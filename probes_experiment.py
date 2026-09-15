@@ -780,12 +780,21 @@ class StimulusRenderer:
                 if include_ground_truth:
                     banner_height = 28
                     draw.rectangle([(0, 0), (w, banner_height)], fill=(0, 0, 0, 200))
-                    results = getattr(trial, "probe_result", "N/A")
-                    obj_cnt = results["object_count"] if isinstance(results, dict) else "N/A"
-                    touches = results["touches_per_segment"] if isinstance(results, dict) else "N/A"
-                    t1_hits = results["target_obj_1_hits"] if isinstance(results, dict) else "N/A"
+                    
+                    # Check trial.results first, then fall back to probe_result/attribute
+                    results = getattr(trial, "results", None) or getattr(trial, "probe_result", None)
 
-                    banner_text = f"Objs Hit: {obj_cnt} | Touches/Seg: {touches} | Obj#1 Hits: {t1_hits}"
+                    if isinstance(results, dict) and results:
+                        # Dynamically format whatever metrics are present in the dictionary
+                        metric_parts = []
+                        for key, value in results.items():
+                            # Abbreviate long key names for banner space if desired
+                            short_key = key.replace("_per_segment", "").replace("_count", "_cnt")
+                            metric_parts.append(f"{short_key}: {value}")
+                        banner_text = " | ".join(metric_parts)
+                    else:
+                        banner_text = "Results: N/A"
+
                     draw.text((8, 6), banner_text, fill=(255, 255, 255, 255))
 
                 out_file = stimuli_dir / f"{trial.trial_id}.png"
