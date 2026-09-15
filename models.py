@@ -421,7 +421,3 @@ class ExpGradient(Optimizer):
                 p.data = p.data/p.data.sum(0)
 
         return loss
-    
-    scores[mask] = weighted_sum[mask] / total_weights[mask]
-    
-    return scores
