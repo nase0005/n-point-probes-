@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, Sequence
 
 import numpy as np
 import pandas as pd
@@ -641,39 +641,68 @@ class GridProbeGenerator:
 # 4. MASK ANALYSIS & METRIC COMPUTATIONS
 # =============================================================================
 
-class ProbeMaskAnalyzer:
-    """Vectorized probe statistics evaluator using standard NumPy array indexing."""
+# Type alias for general probe point inputs
+ProbePointsInput = Union["Probe", Sequence[Tuple[float, float]], np.ndarray]
+
+
+class ProbMaskAnalyzer:
+    """Provides spatial analysis tools for analyzing probe intersections with target label maps."""
 
     @staticmethod
-    def _extract_labels(probe: Probe, label_map: np.ndarray) -> np.ndarray:
+    def _extract_labels(
+        probe_input: ProbePointsInput, 
+        label_map: np.ndarray
+    ) -> np.ndarray:
         """
         Extracts label map values at probe locations using normalized coordinates.
         
-        Works accurately regardless of whether label_map is full-resolution
-        or downsampled.
+        Accepts a `Probe` object, a list of (x, y) tuples, or a NumPy array.
+        Supports full-resolution or downsampled label maps.
         """
         h, w = label_map.shape[:2]
-        
-        # Scale normalized [0.0, 1.0] coordinates to current map dimensions
-        x_coords = np.clip([int(p[0] * w) for p in probe.points_norm], 0, w - 1)
-        y_coords = np.clip([int(p[1] * h) for p in probe.points_norm], 0, h - 1)
-        
+
+        # 1. Coerce probe_input into an (N, 2) float array of normalized coordinates
+        if hasattr(probe_input, "points_norm"):  # Handles Probe dataclass instances
+            pts_norm = np.asarray(probe_input.points_norm, dtype=float)
+        else:
+            pts_norm = np.asarray(probe_input, dtype=float)
+
+        if pts_norm.size == 0:
+            return np.array([], dtype=label_map.dtype)
+
+        if pts_norm.ndim != 2 or pts_norm.shape[1] != 2:
+            raise ValueError(f"Probe points must have shape (N, 2), got shape {pts_norm.shape}")
+
+        # 2. Scale normalized [0.0, 1.0] coordinates to current map dimensions
+        x_coords = np.clip((pts_norm[:, 0] * w).astype(int), 0, w - 1)
+        y_coords = np.clip((pts_norm[:, 1] * h).astype(int), 0, h - 1)
+
         return label_map[y_coords, x_coords]
 
     @classmethod
-    def object_count(cls, probe: Probe, label_map: np.ndarray) -> int:
-        labels = cls._extract_labels(probe, label_map)
+    def object_count(cls, probe_input: ProbePointsInput, label_map: np.ndarray) -> int:
+        labels = cls._extract_labels(probe_input, label_map)
         return int(np.count_nonzero(np.unique(labels[labels > 0])))
 
     @classmethod
-    def touches_per_segment(cls, probe: Probe, label_map: np.ndarray, num_segments: int) -> Dict[int, int]:
-        labels = cls._extract_labels(probe, label_map)
+    def touches_per_segment(
+        cls, 
+        probe_input: ProbePointsInput, 
+        label_map: np.ndarray, 
+        num_segments: int
+    ) -> Dict[int, int]:
+        labels = cls._extract_labels(probe_input, label_map)
         counts = np.bincount(labels[labels > 0], minlength=num_segments + 1)
         return {seg_id: int(counts[seg_id]) for seg_id in range(1, num_segments + 1)}
 
     @classmethod
-    def target_object_hits(cls, probe: Probe, label_map: np.ndarray, target_segment_id: int) -> int:
-        labels = cls._extract_labels(probe, label_map)
+    def target_object_hits(
+        cls, 
+        probe_input: ProbePointsInput, 
+        label_map: np.ndarray, 
+        target_segment_id: int
+    ) -> int:
+        labels = cls._extract_labels(probe_input, label_map)
         return int(np.sum(labels == target_segment_id))
 
     @classmethod
