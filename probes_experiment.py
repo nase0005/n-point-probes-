@@ -164,6 +164,26 @@ class Probe:
         ]
         return cls(points_px=points_px, points_norm=points_norm)
 
+    def generate_binary_mask(self, height: int, width: int, radius: int = 0) -> np.ndarray:
+        """Generates and stores a 2D boolean mask array (Height, Width)."""
+        mask = np.zeros((height, width), dtype=bool)
+        
+        if radius <= 0:
+            for x, y in self.points_px:
+                x_clamped = np.clip(x, 0, width - 1)
+                y_clamped = np.clip(y, 0, height - 1)
+                mask[y_clamped, x_clamped] = True
+        else:
+            y_grid, x_grid = np.ogrid[:height, :width]
+            for x, y in self.points_px:
+                x_clamped = np.clip(x, 0, width - 1)
+                y_clamped = np.clip(y, 0, height - 1)
+                dist_sq = (x_grid - x_clamped) ** 2 + (y_grid - y_clamped) ** 2
+                mask |= (dist_sq <= radius ** 2)
+
+        self.binary_mask = mask
+        return mask
+        
     def validate(self) -> bool:
         if not self.points_px or not self.points_norm:
             return False
@@ -207,6 +227,8 @@ class Run:
     run_id: str
     target_image: TargetImage
     trials: List[Trial] = field(default_factory=list)
+    grid_points_px: Optional[List[Tuple[int, int]]] = None
+    grid_points_norm: Optional[List[Tuple[float, float]]] = None
 
     def validate(self) -> bool:
         if not self.trials:
@@ -214,7 +236,6 @@ class Run:
         if not self.target_image or not self.target_image.validate():
             return False
         return all(t.validate() for t in self.trials)
-
 
 @dataclass
 class RunConfig:
@@ -452,7 +473,6 @@ class GridProbeGenerator:
 
         sampled_points = []
         if total_points_needed >= num_cells:
-            # Guarantee every grid center is sampled at least once
             shuffled_centers = list(grid_centers)
             random.shuffle(shuffled_centers)
             sampled_points.extend(shuffled_centers)
@@ -465,11 +485,12 @@ class GridProbeGenerator:
 
         random.shuffle(sampled_points)
 
-        # Chunk points into Probes with dual coordinates
         probes = []
         for i in range(0, len(sampled_points), self.points_per_probe):
             chunk_px = sampled_points[i : i + self.points_per_probe]
             probe = Probe.from_pixel_points(chunk_px, target_image.width, target_image.height)
+            # Pre-populate binary mask
+            probe.generate_binary_mask(target_image.height, target_image.width)
             probes.append(probe)
 
         return probes
@@ -480,7 +501,16 @@ class GridProbeGenerator:
         policy: ProbeSubsetPolicy = ProbeSubsetPolicy.VISION_SUBSET_OF_IMAGERY,
         seed: Optional[int] = None,
     ) -> None:
-        """Applies probes to Run trials according to subset policy."""
+        """Applies probes and saves full source grid coordinates to the Run."""
+        # Save full grid definition at Run level
+        grid_px = self._get_grid_centers(run.target_image.width, run.target_image.height)
+        grid_norm = [
+            (round(x / float(run.target_image.width), 5), round(y / float(run.target_image.height), 5))
+            for x, y in grid_px
+        ]
+        run.grid_points_px = grid_px
+        run.grid_points_norm = grid_norm
+
         vis_trials = [t for t in run.trials if t.task_mode == "vision"]
         img_trials = [t for t in run.trials if t.task_mode == "imagery"]
 
