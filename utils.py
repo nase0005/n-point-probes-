@@ -156,7 +156,7 @@ def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
     Downsamples all target assets and probe masks in a vectorized data bundle
     to match the sampling grid resolution.
 
-    - Applies `sample_grid_map` to label_map, rgb, rgba, one_hot, and probe masks.
+    - Applies `sample_grid_map` to label_map, rgba_image, one_hot_map, and probe masks.
     - Removes all 'points_px' references.
     - Asserts downsampled probe mask pixel counts match points per probe.
 
@@ -184,7 +184,7 @@ def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
         # ---------------------------------------------------------------------
         assets = data["target_assets"]
 
-        for map_key in ["label_map", "rgb", "rgba", "one_hot"]:
+        for map_key in ["label_map", "rgba_image", "one_hot_map"]:
             if assets.get(map_key) is not None:
                 assets[map_key] = sample_grid_map(assets[map_key], sampling_grid)
 
