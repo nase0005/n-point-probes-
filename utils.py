@@ -145,3 +145,95 @@ def sample_grid_map(
     # 4. Perform grid extraction (np.ix_ preserves row/col grid dimensions)
     sampled = target_map[np.ix_(unique_y, unique_x)]
     return sampled
+
+from copy import deepcopy
+from typing import Dict
+import numpy as np
+
+
+def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
+    """
+    Downsamples all target assets and probe masks in a vectorized data bundle
+    to match the sampling grid resolution.
+
+    - Applies `sample_grid_map` to label_map, rgb, rgba, one_hot, and probe masks.
+    - Removes all 'points_px' references.
+    - Asserts downsampled probe mask pixel counts match points per probe.
+
+    Parameters
+    ----------
+    vec_dict : Dict
+        Vectorized data bundle output from `Experiment.to_data_bundle()`.
+    inplace : bool, optional
+        If True, mutates vec_dict directly. Otherwise returns a modified copy.
+
+    Returns
+    -------
+    Dict
+        The downsampled vectorized data bundle.
+    """
+    bundle = vec_dict if inplace else deepcopy(vec_dict)
+
+    for image_name, data in bundle.items():
+        sampling_grid = data["sampling_grid"].get("points_px")
+        if sampling_grid is None or len(sampling_grid) == 0:
+            continue
+
+        # ---------------------------------------------------------------------
+        # 1. Downsample Target Image Assets & Update Metadata
+        # ---------------------------------------------------------------------
+        assets = data["target_assets"]
+
+        for map_key in ["label_map", "rgb", "rgba", "one_hot"]:
+            if assets.get(map_key) is not None:
+                assets[map_key] = sample_grid_map(assets[map_key], sampling_grid)
+
+        # Update height and width dimensions to match downsampled shape
+        downsampled_h, downsampled_w = assets["label_map"].shape[:2]
+        assets["dimensions"] = {"height": downsampled_h, "width": downsampled_w}
+
+        # ---------------------------------------------------------------------
+        # 2. Downsample Condition Probe Masks & Purge Pixel Points
+        # ---------------------------------------------------------------------
+        for condition in ["vision", "imagery"]:
+            cond_data = data.get(condition)
+            if not cond_data or cond_data.get("num_trials", 0) == 0:
+                continue
+
+            probes = cond_data["probes"]
+
+            # Remove absolute pixel points references
+            probes.pop("points_px", None)
+
+            # Downsample and validate binary masks
+            if "masks" in probes and probes["masks"].size > 0:
+                orig_masks = probes["masks"]  # Shape: (T, H, W)
+                downsampled_masks = []
+
+                # Expected active pixels per probe (points per probe count)
+                if "points_norm" in probes and probes["points_norm"].size > 0:
+                    expected_on_pixels = probes["points_norm"].shape[1]
+                else:
+                    expected_on_pixels = None
+
+                for trial_idx, mask in enumerate(orig_masks):
+                    ds_mask = sample_grid_map(mask, sampling_grid)
+                    actual_on_pixels = int(np.sum(ds_mask))
+
+                    # Verify 'on' pixel count
+                    if expected_on_pixels is not None and actual_on_pixels != expected_on_pixels:
+                        raise ValueError(
+                            f"Mask downsampling mismatch in {image_name} [{condition}] trial index {trial_idx}: "
+                            f"Expected {expected_on_pixels} 'on' pixels, but found {actual_on_pixels}."
+                        )
+
+                    downsampled_masks.append(ds_mask)
+
+                probes["masks"] = np.stack(downsampled_masks, axis=0)
+
+        # ---------------------------------------------------------------------
+        # 3. Purge Sampling Grid Pixel Points
+        # ---------------------------------------------------------------------
+        data["sampling_grid"].pop("points_px", None)
+
+    return bundle
