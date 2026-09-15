@@ -417,7 +417,7 @@ class ExpGradient(Optimizer):
 
                 state['step'] += 1
 
-                p.data = p.data*tch.exp(- lr * grad)
+                p.data = p.data*torch.exp(- lr * grad)
                 p.data = p.data/p.data.sum(0)
 
         return loss
