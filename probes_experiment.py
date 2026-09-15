@@ -645,7 +645,7 @@ class GridProbeGenerator:
 ProbePointsInput = Union["Probe", Sequence[Tuple[float, float]], np.ndarray]
 
 
-class ProbMaskAnalyzer:
+class ProbeMaskAnalyzer:
     """Provides spatial analysis tools for analyzing probe intersections with target label maps."""
 
     @staticmethod
