@@ -452,7 +452,7 @@ class Experiment:
                 results_data = {}
                 first_results = cond_trials[0].probe_result
                 for res_key, res_val in first_results.items():
-                    res_type_list = [t.results.get(res_key) for t in cond_trials]
+                    res_type_list = [t.probe_result.get(res_key) for t in cond_trials]
                     if isinstance(res_val, (int, float, bool)):
                         results_data[res_key] = np.array(res_type_list)
                     elif isinstance(res_val, (list, np.ndarray)):
@@ -460,7 +460,7 @@ class Experiment:
                     elif isinstance(res_val, dict):
                         # Convert dict metrics (e.g., touches_per_segment) into 2D stacked array
                         dict_keys = list(res_val.keys())
-                        matrix = [[t.results[res_key].get(dk, 0) for dk in dict_keys] for t in cond_trials]
+                        matrix = [[t.probe_result[res_key].get(dk, 0) for dk in dict_keys] for t in cond_trials]
                         results_data[res_key] = np.array(matrix)
 
                 return {
