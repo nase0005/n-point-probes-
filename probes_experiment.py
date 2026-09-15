@@ -387,6 +387,98 @@ class Experiment:
 
         return saved_paths
 
+    def to_data_bundle(self) -> Dict[str, Dict]:
+        """
+        Exports a nested dictionary data bundle organized by target image.
+        
+        Trial data for vision and imagery conditions are stacked into concatenated 
+        NumPy arrays along a leading trial dimension.
+        """
+        bundle = {}
+
+        for run in self.runs:
+            img = run.target_image
+            target_key = img.name
+
+            # Target assets sub-dictionary
+            target_assets = {
+                "name": img.name,
+                "image_path": str(img.image_path.as_posix()),
+                "dimensions": {"height": img.height, "width": img.width},
+                "num_segments": img.num_segments,
+                "rgb": img.rgb,
+                "rgba": img.rgba,
+                "label_map": img.label_map,
+                "one_hot": img.one_hot,
+            }
+
+            # Sampling grid sub-dictionary
+            sampling_grid = {
+                "points_px": np.array(run.grid_points_px, dtype=np.int32) if run.grid_points_px else np.array([]),
+                "points_norm": np.array(run.grid_points_norm, dtype=np.float32) if run.grid_points_norm else np.array([]),
+            }
+
+            # Helper function to vectorize condition trials
+            def _build_condition_bundle(task_mode: str) -> Dict:
+                cond_trials = [t for t in run.trials if t.task_mode == task_mode]
+                n_trials = len(cond_trials)
+
+                if n_trials == 0:
+                    return {
+                        "num_trials": 0,
+                        "trial_ids": np.array([], dtype=str),
+                        "probes": {"points_px": np.array([]), "points_norm": np.array([]), "masks": np.array([])},
+                        "results": {},
+                    }
+
+                trial_ids = np.array([t.trial_id for t in cond_trials], dtype=object)
+
+                # Concatenate probe spatial coordinates and masks
+                pts_px_list = [t.probe.points_px for t in cond_trials if t.probe]
+                pts_norm_list = [t.probe.points_norm for t in cond_trials if t.probe]
+                masks_list = [
+                    t.probe.binary_mask 
+                    if (t.probe and t.probe.binary_mask is not None) 
+                    else np.zeros((img.height, img.width), dtype=bool) 
+                    for t in cond_trials
+                ]
+
+                probes_data = {
+                    "points_px": np.array(pts_px_list, dtype=np.int32),
+                    "points_norm": np.array(pts_norm_list, dtype=np.float32),
+                    "masks": np.stack(masks_list, axis=0) if masks_list else np.array([]),
+                }
+
+                # Concatenate scalar and dictionary/array results
+                results_data = {}
+                first_results = cond_trials[0].results
+                for res_key, res_val in first_results.items():
+                    res_type_list = [t.results.get(res_key) for t in cond_trials]
+                    if isinstance(res_val, (int, float, bool)):
+                        results_data[res_key] = np.array(res_type_list)
+                    elif isinstance(res_val, (list, np.ndarray)):
+                        results_data[res_key] = np.stack(res_type_list, axis=0)
+                    elif isinstance(res_val, dict):
+                        # Convert dict metrics (e.g., touches_per_segment) into 2D stacked array
+                        dict_keys = list(res_val.keys())
+                        matrix = [[t.results[res_key].get(dk, 0) for dk in dict_keys] for t in cond_trials]
+                        results_data[res_key] = np.array(matrix)
+
+                return {
+                    "num_trials": n_trials,
+                    "trial_ids": trial_ids,
+                    "probes": probes_data,
+                    "results": results_data,
+                }
+
+            bundle[target_key] = {
+                "target_assets": target_assets,
+                "sampling_grid": sampling_grid,
+                "vision": _build_condition_bundle("vision"),
+                "imagery": _build_condition_bundle("imagery"),
+            }
+
+        return bundle
 
 # =============================================================================
 # 2. TARGET SEGMENTATION (K-MEANS)
