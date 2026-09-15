@@ -13,6 +13,8 @@ import math
 import base64
 import json
 from torch.distributions.dirichlet import Dirichlet
+from torch.optim import Optimizer
+from torch.nn import Module, Parameter
 
 
 # ============================================================================
@@ -165,7 +167,7 @@ class ExpectedObjectCountNet(nn.Module):
 
     def train(self, probes, count_data, lr=10., laplacian_weight=5., spatial_concentration_weight=1., number_of_epochs=2000, print_progress=False):
         ##instantiate a loss function and optimizer
-        from vseg.src.vseg.models import ExpGradient
+        # from vseg.src.vseg.models import ExpGradient
         optimizer = ExpGradient(self.parameters(), lr=lr)
         criterion = nn.MSELoss(reduction='mean')
         lps = LaplacianSmoothnessLoss()
