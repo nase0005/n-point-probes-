@@ -189,211 +189,6 @@ class ExpectedObjectCountNet(nn.Module):
             print('Done')
         return loss_history
 
-        
-
-# ============================================================================
-# Probe Generation 
-# ============================================================================
-
-import torch
-import matplotlib.pyplot as plt
-
-
-class ProbeSet:
-    """
-    Manages k-order probes across dual resolutions: a working resolution (H_work, W_work)
-    and a display resolution (H_disp, W_disp).
-
-    Guarantees exact value consistency by sampling pixel centers on the discrete working
-    grid and mapping them to normalized coordinates [0, 1].
-    """
-    def __init__(self, H_work, W_work, H_disp, W_disp, N, order, device='cpu'):
-        self.H_work = H_work
-        self.W_work = W_work
-        self.H_disp = H_disp
-        self.W_disp = W_disp
-        self.N = N
-        self.order = order
-        self.device = device
-
-        num_pixels_work = H_work * W_work
-        total_slots = N * order
-
-        # Check image coverage flag relative to working resolution
-        self.all_pixels_probed = total_slots > num_pixels_work
-
-        # 1. Deck sampling on the working grid
-        permuted_indices = torch.randperm(num_pixels_work, device=device)
-
-        if total_slots <= num_pixels_work:
-            all_indices = permuted_indices[:total_slots]
-        else:
-            num_fillers = total_slots - num_pixels_work
-            filler_indices = torch.randint(0, num_pixels_work, (num_fillers,), device=device)
-            all_indices = torch.cat([permuted_indices, filler_indices])
-            all_indices = all_indices[torch.randperm(total_slots, device=device)]
-
-        probe_indices = all_indices.view(N, order)
-
-        # 2. Extract discrete working coordinates (row, col)
-        self.y_work = probe_indices // W_work
-        self.x_work = probe_indices % W_work
-
-        # 3. Map pixel centers to normalized range [0, 1] using half-pixel offsets:
-        # norm_coord = (index + 0.5) / size
-        self.coords = torch.stack([
-            (self.x_work.float() + 0.5) / W_work,
-            (self.y_work.float() + 0.5) / H_work
-        ], dim=-1)  # Shape: (N, order, 2)
-
-        # 4. Initialize default masks for both resolutions
-        self.working_masks = self.generate_masks(self.H_work, self.W_work)
-        self.display_masks = self.generate_masks(self.H_disp, self.W_disp)
-
-    def generate_masks(self, H=None, W=None):
-        """
-        Generates binary masks at any specified resolution (H, W).
-        Defaults to the working resolution if H and W are omitted.
-        """
-        target_H = self.H_work if H is None else H
-        target_W = self.W_work if W is None else W
-
-        x_pixels = torch.clamp((self.coords[:, :, 0] * target_W).long(), 0, target_W - 1)
-        y_pixels = torch.clamp((self.coords[:, :, 1] * target_H).long(), 0, target_H - 1)
-
-        flat_indices = y_pixels * target_W + x_pixels
-        num_pixels = target_H * target_W
-
-        flat_masks = torch.zeros(self.N, num_pixels, device=self.device)
-        src_ones = torch.ones_like(flat_indices, dtype=torch.float32)
-        flat_masks.scatter_(1, flat_indices, src_ones)
-
-        return flat_masks.view(self.N, target_H, target_W)
-
-    def sample_image_values(self, display_image, fill_value=0):
-        """
-        Samples values from an image at the display resolution at probed locations,
-        and returns a downsampled image at the working resolution containing those values.
-
-        Args:
-            display_image (Tensor): High-res image of shape (H_disp, W_disp) or (C, H_disp, W_disp).
-            fill_value (int or float): Background value for unprobed pixels in the working image.
-
-        Returns:
-            working_image (Tensor): Downsampled image of shape (H_work, W_work) or (C, H_work, W_work).
-        """
-        if isinstance(display_image, torch.Tensor):
-            img = display_image.to(self.device)
-        else:
-            img = torch.tensor(display_image, device=self.device)
-
-        # 1. Determine spatial mapping to display grid
-        if img.ndim == 2:
-            H_disp, W_disp = img.shape
-            is_multichannel = False
-        elif img.ndim == 3:
-            C, H_disp, W_disp = img.shape
-            is_multichannel = True
-        else:
-            raise ValueError(f"Expected 2D or 3D image tensor, got shape {img.shape}")
-
-        # Compute display pixel coordinates using normalized points
-        x_disp = torch.clamp((self.coords[:, :, 0] * W_disp).long(), 0, W_disp - 1)
-        y_disp = torch.clamp((self.coords[:, :, 1] * H_disp).long(), 0, H_disp - 1)
-
-        # 2. Extract values from display image at probe locations
-        if is_multichannel:
-            # Extracted shape: (C, N, order)
-            sampled_values = img[:, y_disp, x_disp]
-            # Construct working canvas: (C, H_work, W_work)
-            working_image = torch.full(
-                (C, self.H_work, self.W_work),
-                fill_value,
-                dtype=img.dtype,
-                device=self.device
-            )
-            # Scatter sampled values onto their corresponding working grid locations
-            working_image[:, self.y_work, self.x_work] = sampled_values
-        else:
-            # Extracted shape: (N, order)
-            sampled_values = img[y_disp, x_disp]
-            # Construct working canvas: (H_work, W_work)
-            working_image = torch.full(
-                (self.H_work, self.W_work),
-                fill_value,
-                dtype=img.dtype,
-                device=self.device
-            )
-            # Scatter sampled values onto their corresponding working grid locations
-            working_image[self.y_work, self.x_work] = sampled_values
-
-        return working_image
-
-    def plot_probe(self, image, probe_idx=0, radius=8, color='red', alpha=0.8, ax=None, plain=True):
-        """
-        Overlays points for a single probe onto an image.
-
-        Args:
-            image (Tensor or ndarray): Input image to plot.
-            probe_idx (int): Index of the probe to overlay.
-            radius (float): Size radius for scatter points.
-            color (str): Scatter point color.
-            alpha (float): Transparency level of scatter points.
-            ax (Axes, optional): Pre-existing Matplotlib axes object.
-            plain (bool): If True, plots without titles, legend, axis marks, or padding.
-                          If False, plots with standard title, legend, and formatting.
-        """
-        if isinstance(image, torch.Tensor):
-            if image.ndim == 3 and image.shape[0] in [1, 3, 4]:
-                img_np = image.detach().cpu().permute(1, 2, 0).numpy()
-                if img_np.shape[2] == 1:
-                    img_np = img_np.squeeze(-1)
-            else:
-                img_np = image.detach().cpu().numpy()
-        else:
-            img_np = image
-
-        img_H, img_W = img_np.shape[:2]
-        probe_coords = self.coords[probe_idx].detach().cpu()
-
-        x_pixels = probe_coords[:, 0] * img_W
-        y_pixels = probe_coords[:, 1] * img_H
-
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 8))
-        else:
-            fig = ax.get_figure()
-
-        cmap = 'gray' if img_np.ndim == 2 else None
-        ax.imshow(img_np, cmap=cmap)
-        ax.scatter(
-            x_pixels,
-            y_pixels,
-            s=radius**2,
-            c=color,
-            edgecolors='white',
-            linewidths=1.5,
-            alpha=alpha,
-            label=f"Probe #{probe_idx}"
-        )
-
-        ax.axis('off')
-
-        if plain:
-            # Strip all padding/margins and titles for clean saving
-            ax.set_title("")
-            fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
-        else:
-            # Apply standard embellishments
-            ax.set_title(f"Probe Set #{probe_idx} ({self.order} points) [{img_W}x{img_H}]")
-            ax.legend(loc='upper right')
-
-        return ax
-
-    def __repr__(self):
-        return (f"ProbeSet(N={self.N}, order={self.order}, "
-                f"working=({self.H_work}, {self.W_work}), "
-                f"display=({self.H_disp}, {self.W_disp}))")
 
 
 # ============================================================================
@@ -547,6 +342,83 @@ def objectwise_similarity(learned_map, truth_map, threshold_ratio=1.0):
     # We set their score to 0.0
     scores = torch.zeros_like(weighted_sum)
     mask = total_weights > 0
+
+
+# exponentiated gradient descent
+class ExpGradient(Optimizer):
+    r'''Exponentiated gradient descent optimizer.
+
+    The class ``ExpGradient`` is a subclass of torch.Optimizer. The gradient
+    step is
+
+    .. math::
+
+        x_i = x_i \exp\left( -\lambda \nabla L \right) \quad \text{and} 
+        \quad x_i = \frac{x_i}{\sum_k x_k}
+    
+                
+    where :math:`\lambda` is the learning rate and :math:`L` is the loss 
+    function.
+
+    Parameters
+    ----------
+    params : iterable
+        Iterable of params to optimize or dicts defining param groups.
+    lr : float
+        Learning rate (default: 1e-3).
+
+
+    .. Note:: 
+
+    This implementation authored by Jonathan Vacher, 2021
+    
+    The exponentiated Gradient descent is introduced in 
+
+        Kivinen J, Warmuth MK. Exponentiated gradient versus gradient 
+        descent for linear predictors. Information and computation. 1997;
+        132(1):1–63.
+
+    
+    '''
+    def __init__(self, params, lr=1e-3):
+        if lr <= 0.0:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        defaults = dict(lr=lr)
+        super(ExpGradient, self).__init__(params, defaults)
+
+    def step(self, closure=None):
+        '''Performs a single optimization step.
+        
+        :closure (callable, optional): A closure that reevaluates the model
+        	and returns the loss.
+        '''
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        #step_size = self.defaults['lr']
+        for group in self.param_groups:
+            lr = group['lr']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError('ExpGradient does not support sparse '
+                                        +'gradients.')
+
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+
+                state['step'] += 1
+
+                p.data = p.data*tch.exp(- lr * grad)
+                p.data = p.data/p.data.sum(0)
+
+        return loss
     
     scores[mask] = weighted_sum[mask] / total_weights[mask]
     
