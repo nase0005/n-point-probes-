@@ -450,7 +450,7 @@ class Experiment:
 
                 # Concatenate scalar and dictionary/array results
                 results_data = {}
-                first_results = cond_trials[0].results
+                first_results = cond_trials[0].probe_result
                 for res_key, res_val in first_results.items():
                     res_type_list = [t.results.get(res_key) for t in cond_trials]
                     if isinstance(res_val, (int, float, bool)):
