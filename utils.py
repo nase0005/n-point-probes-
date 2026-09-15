@@ -82,3 +82,66 @@ def extract_segment_count_from_filename(
         return int(match.group(1))
     
     return default
+
+from typing import List, Tuple, Union
+import numpy as np
+
+
+def sample_grid_map(
+    target_map: np.ndarray, 
+    grid_points: Union[List[Tuple[int, int]], np.ndarray]
+) -> np.ndarray:
+    """
+    Downsamples a spatial map at a set of regular grid points.
+    
+    Parameters
+    ----------
+    target_map : np.ndarray
+        Array of shape (H, W) for label maps or (H, W, C) for one-hot maps.
+    grid_points : List[Tuple[int, int]] or np.ndarray
+        Coordinates as (x, y) pixel integers representing grid cell centers.
+        
+    Returns
+    -------
+    sampled_map : np.ndarray
+        Array of shape (rows, cols) for label_maps, or (rows, cols, C) for one-hot maps,
+        matching the spatial dimensions of the target grid.
+    """
+    pts = np.asarray(grid_points, dtype=int)
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError("grid_points must be an (N, 2) sequence of (x, y) coordinates.")
+    
+    x_coords = pts[:, 0]
+    y_coords = pts[:, 1]
+    
+    unique_x = np.unique(x_coords)
+    unique_y = np.unique(y_coords)
+
+    # 1. Check completeness: points must fill a complete unique_y x unique_x product
+    expected_count = len(unique_y) * len(unique_x)
+    if len(pts) != expected_count:
+        raise ValueError(
+            f"Incomplete grid: Expected {expected_count} unique points "
+            f"({len(unique_y)} rows x {len(unique_x)} cols), but got {len(pts)}."
+        )
+
+    # 2. Check regularity: steps between consecutive unique coordinates must be equal
+    if len(unique_x) > 1:
+        dx = np.diff(unique_x)
+        if not np.all(dx == dx[0]):
+            raise ValueError(f"Irregular grid spacing along X axis: step sizes = {dx}")
+            
+    if len(unique_y) > 1:
+        dy = np.diff(unique_y)
+        if not np.all(dy == dy[0]):
+            raise ValueError(f"Irregular grid spacing along Y axis: step sizes = {dy}")
+
+    # 3. Verify all Cartesian combinations exist in input
+    grid_set = set(map(tuple, pts))
+    expected_set = {(x, y) for y in unique_y for x in unique_x}
+    if grid_set != expected_set:
+        raise ValueError("Irregular grid layout: Points do not form a complete, axis-aligned rectangular grid.")
+
+    # 4. Perform grid extraction (np.ix_ preserves row/col grid dimensions)
+    sampled = target_map[np.ix_(unique_y, unique_x)]
+    return sampled
