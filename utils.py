@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Optional
 import numpy as np
 from PIL import Image
 from probes_experiment import TargetImage
