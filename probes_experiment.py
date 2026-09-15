@@ -646,9 +646,18 @@ class ProbeMaskAnalyzer:
 
     @staticmethod
     def _extract_labels(probe: Probe, label_map: np.ndarray) -> np.ndarray:
+        """
+        Extracts label map values at probe locations using normalized coordinates.
+        
+        Works accurately regardless of whether label_map is full-resolution
+        or downsampled.
+        """
         h, w = label_map.shape[:2]
-        x_coords = np.clip([p[0] for p in probe.points_px], 0, w - 1)
-        y_coords = np.clip([p[1] for p in probe.points_px], 0, h - 1)
+        
+        # Scale normalized [0.0, 1.0] coordinates to current map dimensions
+        x_coords = np.clip([int(p[0] * w) for p in probe.points_norm], 0, w - 1)
+        y_coords = np.clip([int(p[1] * h) for p in probe.points_norm], 0, h - 1)
+        
         return label_map[y_coords, x_coords]
 
     @classmethod
