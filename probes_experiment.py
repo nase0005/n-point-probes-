@@ -406,9 +406,9 @@ class Experiment:
                 "image_path": str(img.image_path.as_posix()),
                 "dimensions": {"height": img.height, "width": img.width},
                 "num_segments": img.num_segments,
-                "rgba": img.rgba_image,
+                "rgba_image": img.rgba_image,
                 "label_map": img.label_map,
-                "one_hot": img.one_hot,
+                "one_hot_map": img.one_hot_map,
             }
 
             # Sampling grid sub-dictionary
