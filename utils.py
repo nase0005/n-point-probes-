@@ -151,13 +151,18 @@ from typing import Dict
 import numpy as np
 
 
+from copy import deepcopy
+from typing import Dict
+import numpy as np
+
+
 def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
     """
     Downsamples all target assets and probe masks in a vectorized data bundle
     to match the sampling grid resolution.
 
     - Applies `sample_grid_map` to label_map, rgba_image, one_hot_map, and probe masks.
-    - Removes all 'points_px' references.
+    - Remaps 'points_px' for probes and sampling grids to downsampled discrete integer coordinates.
     - Asserts downsampled probe mask pixel counts match points per probe.
 
     Parameters
@@ -193,7 +198,7 @@ def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
         assets["dimensions"] = {"height": downsampled_h, "width": downsampled_w}
 
         # ---------------------------------------------------------------------
-        # 2. Downsample Condition Probe Masks & Purge Pixel Points
+        # 2. Downsample Condition Probe Masks & Remap Probe Pixel Coordinates
         # ---------------------------------------------------------------------
         for condition in ["vision", "imagery"]:
             cond_data = data.get(condition)
@@ -202,8 +207,15 @@ def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
 
             probes = cond_data["probes"]
 
-            # Remove absolute pixel points references
-            probes.pop("points_px", None)
+            # Remap probe points_px to downsampled integer grid coordinates
+            if "points_norm" in probes and probes["points_norm"].size > 0:
+                pts_norm = probes["points_norm"]  # Shape: (T, P, 2)
+                
+                # Scale normalized [0.0, 1.0] coordinates to discrete downsampled spatial dimensions
+                px_x = np.clip((pts_norm[..., 0] * downsampled_w).astype(np.int32), 0, downsampled_w - 1)
+                px_y = np.clip((pts_norm[..., 1] * downsampled_h).astype(np.int32), 0, downsampled_h - 1)
+                
+                probes["points_px"] = np.stack([px_x, px_y], axis=-1)
 
             # Downsample and validate binary masks
             if "masks" in probes and probes["masks"].size > 0:
@@ -232,8 +244,13 @@ def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
                 probes["masks"] = np.stack(downsampled_masks, axis=0)
 
         # ---------------------------------------------------------------------
-        # 3. Purge Sampling Grid Pixel Points
+        # 3. Remap Sampling Grid Pixel Coordinates to Discrete Grid Coordinates
         # ---------------------------------------------------------------------
-        data["sampling_grid"].pop("points_px", None)
+        if "points_norm" in data["sampling_grid"] and data["sampling_grid"]["points_norm"].size > 0:
+            grid_norm = data["sampling_grid"]["points_norm"]  # Shape: (N, 2)
+            grid_px_x = np.clip((grid_norm[:, 0] * downsampled_w).astype(np.int32), 0, downsampled_w - 1)
+            grid_px_y = np.clip((grid_norm[:, 1] * downsampled_h).astype(np.int32), 0, downsampled_h - 1)
+            
+            data["sampling_grid"]["points_px"] = np.stack([grid_px_x, grid_px_y], axis=-1)
 
     return bundle
