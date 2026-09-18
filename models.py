@@ -191,11 +191,106 @@ class ExpectedObjectCountNet(nn.Module):
             print('Done')
         return loss_history
 
+# ============================================================================
+# Target hits network
+# ============================================================================
+
+class TargetHitsNet(nn.Module):
+    """Directly optimizes probability logits for an h x w image grid across k segments.
+
+    Exponentiated Gradient Descent is natively implemented by optimizing logits 'w'
+    with standard SGD, as Softmax(w) mirror-descents on p.
+    """
+
+    def __init__(self, height: int, width: int, num_segments: int):
+            super().__init__()
+            self.height = height
+            self.width = width
+            self.num_segments = num_segments
+
+            # Initialize with small random values from standard normal: N(0, 0.01^2)
+            self.logits = nn.Parameter(
+                0.01
+                * torch.randn(
+                    num_segments, height, width, dtype=torch.float32
+                )
+            )
+
+    def get_probabilities(self) -> torch.Tensor:
+        """Returns normalized segment probabilities p_v(x_j) of shape (k, h, w)."""
+        return torch.softmax(self.logits, dim=0)
+
+    def forward(
+        self, coords: torch.Tensor, target_segment: int
+    ) -> torch.Tensor:
+        """Args:
+
+        coords: LongTensor of shape (B, n, 2) containing (y, x) pixel
+        coordinates. target_segment: Index v of the segment of interest.
+
+        Returns:
+            p_v: Tensor of shape (B, n) with p_v(x_j) for sampled pixels.
+        """
+        probs = self.get_probabilities()[target_segment]  # Shape (h, w)
+
+        # Gather p_v(x_j) for each sampled coordinate (y, x)
+        xs = coords[..., 0]
+        ys = coords[..., 1]
+        p_v = probs[ys, xs]  # Shape (B, n)
+        return p_v
+
 
 
 # ============================================================================
-# Regularization Loss Functions
+# Regularization and Loss Functions
 # ============================================================================
+
+class PoissonBinomialPMF(nn.Module):
+    """Computes P(R_v = r) for Poisson Binomial Distribution using dynamic programming.
+
+    Given probabilities p of shape (batch_size, n), this computes the log-likelihood
+    of observing exactly 'r' hits out of 'n' samples.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, p: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+        """Args:
+
+        p: Tensor of shape (B, n) containing p_v(x_j) probabilities.
+        r: Tensor of shape (B,) containing observed target segment counts.
+
+        Returns:
+            log_prob: Tensor of shape (B,) containing log P(R_v = r).
+        """
+        B, n = p.shape
+
+        # dp[i][j] = P(j hits using first i pixels)
+        # We compute this in log-space or probability space; using DP table:
+        dp = torch.zeros(B, n + 1, device=p.device, dtype=p.dtype)
+        dp[:, 0] = 1.0  # Base case: 0 pixels sampled -> 0 hits with probability 1
+
+        for i in range(n):
+            p_i = p[:, i : i + 1]  # Shape (B, 1)
+            dp_next = torch.zeros_like(dp)
+
+            # 0 hits at step i+1: previous 0 hits AND pixel i is not target
+            dp_next[:, 0] = dp[:, 0] * (1.0 - p_i.squeeze(-1))
+
+            # k hits at step i+1: (k hits & not target) OR (k-1 hits & target)
+            dp_next[:, 1:] = dp[:, 1:] * (1.0 - p_i) + dp[:, :-1] * p_i
+
+            dp = dp_next
+
+        # Gather probability corresponding to observed r for each batch item
+        batch_indices = torch.arange(B, device=p.device)
+        prob_r = dp[batch_indices, r]
+
+        # Numerical stability clamp
+        prob_r = torch.clamp(prob_r, min=1e-12)
+        return torch.log(prob_r)
+
 
 class LaplacianSmoothnessLoss(nn.Module):
     """
