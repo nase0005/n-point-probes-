@@ -636,6 +636,265 @@ class GridProbeGenerator:
         _attach(vis_trials, vis_probes)
         _attach(img_trials, img_probes)
 
+class BalancedProbeGenerator:
+    """
+    Modular probe sampling generator that satisfies three hard constraints:
+    1. Full/Uniform Grid Coverage across all sampling grid cells.
+    2. Balanced Response Levels (0 <= r <= n target segment hits per probe).
+    3. Matched Spatial Scale (pairwise point distance distributions matched across levels).
+    """
+
+    def __init__(
+        self,
+        grid_shape: Tuple[int, int],
+        points_per_probe: int = 4,
+        target_segment_id: int = 1,
+        num_candidates: int = 100,
+        coverage_alpha: float = 2.0,
+        distance_weight: float = 1.0,
+    ):
+        """
+        Parameters
+        ----------
+        grid_shape : Tuple[int, int]
+            Grid layout as (rows, cols).
+        points_per_probe : int
+            Number of points per probe (n).
+        target_segment_id : int
+            Label ID of the target object segment in target_image.label_map.
+        num_candidates : int
+            Number of probe candidate draws per slot evaluated for distance matching.
+        coverage_alpha : float
+            Exponent for inverse-coverage sampling weights (higher = stricter uniform coverage).
+        distance_weight : float
+            Weight assigned to matching target pairwise distances during candidate scoring.
+        """
+        self.grid_rows, self.grid_cols = grid_shape
+        self.points_per_probe = points_per_probe
+        self.target_segment_id = target_segment_id
+        self.num_candidates = num_candidates
+        self.coverage_alpha = coverage_alpha
+        self.distance_weight = distance_weight
+
+    def _get_grid_centers(self, img_w: int, img_h: int) -> List[Tuple[int, int]]:
+        """Calculates discrete pixel centers for the defined grid dimensions."""
+        x_edges = np.linspace(0, img_w, self.grid_cols + 1)
+        y_edges = np.linspace(0, img_h, self.grid_rows + 1)
+
+        centers = []
+        for r in range(self.grid_rows):
+            for c in range(self.grid_cols):
+                cx = int((x_edges[c] + x_edges[c + 1]) / 2)
+                cy = int((y_edges[r] + y_edges[r + 1]) / 2)
+                centers.append((cx, cy))
+        return centers
+
+    @staticmethod
+    def _mean_pairwise_distance(pts: np.ndarray) -> float:
+        """Computes mean Euclidean distance between all pairs of points in a probe."""
+        if len(pts) < 2:
+            return 0.0
+        diff = pts[:, None, :] - pts[None, :, :]
+        dist_matrix = np.sqrt(np.sum(diff ** 2, axis=-1))
+        triu_indices = np.triu_indices(len(pts), k=1)
+        return float(np.mean(dist_matrix[triu_indices]))
+
+    def _estimate_target_distance_distribution(self, grid_pts: np.ndarray, n_samples: int = 1000) -> float:
+        """Estimates global target mean pairwise distance across random n-point probes."""
+        distances = []
+        n_grid = len(grid_pts)
+        for _ in range(n_samples):
+            idx = np.random.choice(n_grid, size=self.points_per_probe, replace=False)
+            probe_pts = grid_pts[idx]
+            distances.append(self._mean_pairwise_distance(probe_pts))
+        return float(np.mean(distances))
+
+    def generate_probes(
+        self,
+        target_image: TargetImage,
+        count: int,
+        seed: Optional[int] = None
+    ) -> List[Probe]:
+        """
+        Generates balanced Probe objects for a given TargetImage.
+
+        Parameters
+        ----------
+        target_image : TargetImage
+            Image container holding dimensions and label_map.
+        count : int
+            Total number of probes to generate.
+        seed : Optional[int]
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        probes : List[Probe]
+            List of Probe dataclass instances with populated points and binary masks.
+        """
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+
+        if target_image.label_map is None:
+            raise ValueError(
+                f"TargetImage '{target_image.name}' requires a non-None label_map for BalancedProbeGenerator."
+            )
+
+        label_map = target_image.label_map
+        grid_centers = self._get_grid_centers(target_image.width, target_image.height)
+
+        # 1. Partition grid centers into Target (S) and Background (S_c) sets
+        target_grid_pts = np.array(
+            [pt for pt in grid_centers if label_map[pt[1], pt[0]] == self.target_segment_id],
+            dtype=int
+        )
+        bg_grid_pts = np.array(
+            [pt for pt in grid_centers if label_map[pt[1], pt[0]] != self.target_segment_id],
+            dtype=int
+        )
+
+        if len(target_grid_pts) == 0:
+            raise ValueError(f"Target segment ID {self.target_segment_id} not found at any grid centers.")
+        if len(bg_grid_pts) == 0:
+            raise ValueError(f"Background non-target region not found at any grid centers.")
+
+        all_grid_pts = np.array(grid_centers, dtype=int)
+        target_mean_dist = self._estimate_target_distance_distribution(all_grid_pts)
+
+        # 2. Build Response Level Queue (Constraint 2: Equal r=0..n distribution)
+        n_levels = self.points_per_probe + 1
+        probes_per_level = count // n_levels
+        remainder = count % n_levels
+
+        level_schedule = []
+        for r in range(n_levels):
+            level_schedule.extend([r] * probes_per_level)
+        for r in range(remainder):
+            level_schedule.append(r)
+        random.shuffle(level_schedule)
+
+        # 3. Track Grid Coverage (Constraint 1)
+        target_coverage = np.zeros(len(target_grid_pts), dtype=int)
+        bg_coverage = np.zeros(len(bg_grid_pts), dtype=int)
+
+        probes = []
+
+        # 4. Generate Probes
+        for r in level_schedule:
+            n_target = r
+            n_bg = self.points_per_probe - r
+
+            best_candidate = None
+            best_score = float("inf")
+            best_target_idx = None
+            best_bg_idx = None
+
+            # Sample candidates and select the best distance/coverage match
+            for _ in range(self.num_candidates):
+                # Calculate inverse-coverage weights
+                if n_target > 0:
+                    w_t = 1.0 / (1.0 + target_coverage) ** self.coverage_alpha
+                    w_t /= w_t.sum()
+                    replace_t = len(target_grid_pts) < n_target
+                    t_idx = np.random.choice(len(target_grid_pts), size=n_target, replace=replace_t, p=w_t)
+                    cand_t = target_grid_pts[t_idx]
+                else:
+                    t_idx, cand_t = np.array([], dtype=int), np.empty((0, 2), dtype=int)
+
+                if n_bg > 0:
+                    w_b = 1.0 / (1.0 + bg_coverage) ** self.coverage_alpha
+                    w_b /= w_b.sum()
+                    replace_b = len(bg_grid_pts) < n_bg
+                    b_idx = np.random.choice(len(bg_grid_pts), size=n_bg, replace=replace_b, p=w_b)
+                    cand_b = bg_grid_pts[b_idx]
+                else:
+                    b_idx, cand_b = np.array([], dtype=int), np.empty((0, 2), dtype=int)
+
+                cand_pts = np.vstack([cand_t, cand_b]) if len(cand_t) and len(cand_b) else (cand_t if len(cand_t) else cand_b)
+
+                # Score candidate based on spatial scale match & coverage balance
+                cand_dist = self._mean_pairwise_distance(cand_pts)
+                dist_error = abs(cand_dist - target_mean_dist)
+
+                cov_penalty = 0.0
+                if n_target > 0:
+                    cov_penalty += float(np.mean(target_coverage[t_idx]))
+                if n_bg > 0:
+                    cov_penalty += float(np.mean(bg_coverage[b_idx]))
+
+                score = (self.distance_weight * dist_error) + cov_penalty
+
+                if score < best_score:
+                    best_score = score
+                    best_candidate = cand_pts
+                    best_target_idx = t_idx
+                    best_bg_idx = b_idx
+
+            # Update coverage trackers
+            if len(best_target_idx) > 0:
+                target_coverage[best_target_idx] += 1
+            if len(best_bg_idx) > 0:
+                bg_coverage[best_bg_idx] += 1
+
+            # Convert to Probe instance with pixel coordinates, normalized coordinates, and binary masks
+            chunk_px = [(int(pt[0]), int(pt[1])) for pt in best_candidate]
+            probe = Probe.from_pixel_points(chunk_px, target_image.width, target_image.height)
+            probe.generate_binary_mask(target_image.height, target_image.width)
+            probes.append(probe)
+
+        return probes
+
+    def assign_probes_to_run(
+        self,
+        run: Run,
+        policy: ProbeSubsetPolicy = ProbeSubsetPolicy.VISION_SUBSET_OF_IMAGERY,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Applies probes and saves full source grid coordinates to the Run."""
+        # Save full grid definition at Run level
+        grid_px = self._get_grid_centers(run.target_image.width, run.target_image.height)
+        grid_norm = [
+            (round(x / float(run.target_image.width), 5), round(y / float(run.target_image.height), 5))
+            for x, y in grid_px
+        ]
+        run.grid_points_px = grid_px
+        run.grid_points_norm = grid_norm
+
+        vis_trials = [t for t in run.trials if t.task_mode == "vision"]
+        img_trials = [t for t in run.trials if t.task_mode == "imagery"]
+
+        n_vis_unique = len(set(t.trial_id.rsplit("_r", 1)[0] for t in vis_trials))
+        n_img_unique = len(set(t.trial_id.rsplit("_r", 1)[0] for t in img_trials))
+
+        max_unique = max(n_vis_unique, n_img_unique)
+        master_pool = self.generate_probes(run.target_image, count=max_unique, seed=seed)
+
+        if policy == ProbeSubsetPolicy.VISION_SUBSET_OF_IMAGERY:
+            img_probes = master_pool[:n_img_unique]
+            vis_probes = random.sample(master_pool, k=n_vis_unique)
+        elif policy == ProbeSubsetPolicy.IMAGERY_SUBSET_OF_VISION:
+            vis_probes = master_pool[:n_vis_unique]
+            img_probes = random.sample(master_pool, k=n_img_unique)
+        elif policy == ProbeSubsetPolicy.SHARED_EQUAL:
+            vis_probes = master_pool[:n_vis_unique]
+            img_probes = master_pool[:n_img_unique]
+        elif policy == ProbeSubsetPolicy.INDEPENDENT:
+            vis_probes = self.generate_probes(run.target_image, count=n_vis_unique, seed=seed)
+            img_probes = self.generate_probes(run.target_image, count=n_img_unique, seed=seed)
+
+        def _attach(trials: List[Trial], probe_pool: List[Probe]):
+            trial_groups: Dict[str, List[Trial]] = {}
+            for t in trials:
+                base_id = t.trial_id.rsplit("_r", 1)[0]
+                trial_groups.setdefault(base_id, []).append(t)
+            for (base_id, t_list), prb in zip(trial_groups.items(), probe_pool):
+                for t in t_list:
+                    t.probe = prb
+
+        _attach(vis_trials, vis_probes)
+        _attach(img_trials, img_probes)
+
 
 # =============================================================================
 # 4. MASK ANALYSIS & METRIC COMPUTATIONS
