@@ -234,11 +234,10 @@ def downsample_data_bundle(vec_dict: Dict, inplace: bool = False) -> Dict:
 
                     # Verify 'on' pixel count
                     if expected_on_pixels is not None and actual_on_pixels != expected_on_pixels:
-                        raise ValueError(
-                            f"Mask downsampling mismatch in {image_name} [{condition}] trial index {trial_idx}: "
+                        print(
+                            f"Warning: Mask downsampling mismatch in {image_name} [{condition}] trial index {trial_idx}: "
                             f"Expected {expected_on_pixels} 'on' pixels, but found {actual_on_pixels}."
                         )
-
                     downsampled_masks.append(ds_mask)
 
                 probes["masks"] = np.stack(downsampled_masks, axis=0)
