@@ -8,7 +8,7 @@ from probes_experiment import TargetImage
 
 def load_target_images_from_directory(
     directory_path: Union[str, Path],
-    extensions: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".webp"),
+    extensions: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff"),
     recursive: bool = False
 ) -> List[TargetImage]:
     """
