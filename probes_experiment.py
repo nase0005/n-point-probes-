@@ -486,59 +486,59 @@ class Experiment:
 class TargetSegmenter:
     """K-Means segmentation processor for RGB/RGBA TargetImages."""
 
-@staticmethod
-def segment_kmeans(target_image: TargetImage, n_clusters: int, seed: int = 42) -> None:
-    """Performs K-Means color segmentation and updates target_image attributes.
+    @staticmethod
+    def segment_kmeans(target_image: TargetImage, n_clusters: int, seed: int = 42) -> None:
+        """Performs K-Means color segmentation and updates target_image attributes.
+        
+        Segment labels (1..N) are assigned in descending order of size, where label 1 
+        corresponds to the largest cluster by pixel count.
+        """
+        if target_image.rgba_image is None:
+            raise ValueError("RGBA image array missing in TargetImage.")
     
-    Segment labels (1..N) are assigned in descending order of size, where label 1 
-    corresponds to the largest cluster by pixel count.
-    """
-    if target_image.rgba_image is None:
-        raise ValueError("RGBA image array missing in TargetImage.")
-
-    rgb_pixels = target_image.rgba_image[:, :, :3].reshape(-1, 3).astype(np.float32)
-
-    np.random.seed(seed)
-    initial_indices = np.random.choice(len(rgb_pixels), size=n_clusters, replace=False)
-    centroids = rgb_pixels[initial_indices]
-
-    for _ in range(15):
-        distances = np.linalg.norm(rgb_pixels[:, np.newaxis] - centroids, axis=2)
-        labels = np.argmin(distances, axis=1)
-
-        new_centroids = np.array([
-            rgb_pixels[labels == k].mean(axis=0) if np.sum(labels == k) > 0 else centroids[k]
-            for k in range(n_clusters)
-        ])
-        if np.allclose(centroids, new_centroids, atol=1e-2):
-            break
-        centroids = new_centroids
-
-    # ---------------------------------------------------------------------
-    # Remap labels by segment size in descending order (Largest = Label 1)
-    # ---------------------------------------------------------------------
-    counts = np.bincount(labels, minlength=n_clusters)
-    sorted_cluster_ids = np.argsort(counts)[::-1]  # Cluster IDs sorted by count (high -> low)
-
-    # Create mapping array: raw_cluster_id -> rank_label (1..N)
-    rank_mapping = np.zeros(n_clusters, dtype=np.int32)
-    for rank, cluster_id in enumerate(sorted_cluster_ids):
-        rank_mapping[cluster_id] = rank + 1  # Reserve 0 for background
-
-    remapped_labels = rank_mapping[labels]
-
-    # Map labels to 2D spatial array
-    h, w = target_image.shape
-    label_map = remapped_labels.reshape((h, w)).astype(np.int32)
-
-    # Build one-hot spatial mask tensor (H, W, N)
-    # Channel k corresponds to label (k + 1) [channel 0 = largest segment]
-    one_hot_map = np.zeros((h, w, n_clusters), dtype=np.uint8)
-    for k in range(n_clusters):
-        one_hot_map[:, :, k] = (label_map == (k + 1)).astype(np.uint8)
-
-    target_image.label_map = label_map
-    target_image.one_hot_map = one_hot_map
+        rgb_pixels = target_image.rgba_image[:, :, :3].reshape(-1, 3).astype(np.float32)
+    
+        np.random.seed(seed)
+        initial_indices = np.random.choice(len(rgb_pixels), size=n_clusters, replace=False)
+        centroids = rgb_pixels[initial_indices]
+    
+        for _ in range(15):
+            distances = np.linalg.norm(rgb_pixels[:, np.newaxis] - centroids, axis=2)
+            labels = np.argmin(distances, axis=1)
+    
+            new_centroids = np.array([
+                rgb_pixels[labels == k].mean(axis=0) if np.sum(labels == k) > 0 else centroids[k]
+                for k in range(n_clusters)
+            ])
+            if np.allclose(centroids, new_centroids, atol=1e-2):
+                break
+            centroids = new_centroids
+    
+        # ---------------------------------------------------------------------
+        # Remap labels by segment size in descending order (Largest = Label 1)
+        # ---------------------------------------------------------------------
+        counts = np.bincount(labels, minlength=n_clusters)
+        sorted_cluster_ids = np.argsort(counts)[::-1]  # Cluster IDs sorted by count (high -> low)
+    
+        # Create mapping array: raw_cluster_id -> rank_label (1..N)
+        rank_mapping = np.zeros(n_clusters, dtype=np.int32)
+        for rank, cluster_id in enumerate(sorted_cluster_ids):
+            rank_mapping[cluster_id] = rank + 1  # Reserve 0 for background
+    
+        remapped_labels = rank_mapping[labels]
+    
+        # Map labels to 2D spatial array
+        h, w = target_image.shape
+        label_map = remapped_labels.reshape((h, w)).astype(np.int32)
+    
+        # Build one-hot spatial mask tensor (H, W, N)
+        # Channel k corresponds to label (k + 1) [channel 0 = largest segment]
+        one_hot_map = np.zeros((h, w, n_clusters), dtype=np.uint8)
+        for k in range(n_clusters):
+            one_hot_map[:, :, k] = (label_map == (k + 1)).astype(np.uint8)
+    
+        target_image.label_map = label_map
+        target_image.one_hot_map = one_hot_map
 
 
 # =============================================================================
