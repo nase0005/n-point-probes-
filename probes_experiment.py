@@ -486,9 +486,13 @@ class Experiment:
 class TargetSegmenter:
     """K-Means segmentation processor for RGB/RGBA TargetImages."""
 
-    @staticmethod
+@staticmethod
     def segment_kmeans(target_image: TargetImage, n_clusters: int, seed: int = 42) -> None:
-        """Performs K-Means color segmentation and updates target_image attributes."""
+        """Performs K-Means color segmentation and updates target_image attributes.
+        
+        Segment labels (1..N) are assigned in descending order of size, where label 1 
+        corresponds to the largest cluster by pixel count.
+        """
         if target_image.rgba_image is None:
             raise ValueError("RGBA image array missing in TargetImage.")
 
@@ -510,11 +514,25 @@ class TargetSegmenter:
                 break
             centroids = new_centroids
 
-        # Map labels to 1..N (reserve 0 for background)
+        # ---------------------------------------------------------------------
+        # Remap labels by segment size in descending order (Largest = Label 1)
+        # ---------------------------------------------------------------------
+        counts = np.bincount(labels, minlength=n_clusters)
+        sorted_cluster_ids = np.argsort(counts)[::-1]  # Cluster IDs sorted by count (high -> low)
+
+        # Create mapping array: raw_cluster_id -> rank_label (1..N)
+        rank_mapping = np.zeros(n_clusters, dtype=np.int32)
+        for rank, cluster_id in enumerate(sorted_cluster_ids):
+            rank_mapping[cluster_id] = rank + 1  # Reserve 0 for background
+
+        remapped_labels = rank_mapping[labels]
+
+        # Map labels to 2D spatial array
         h, w = target_image.shape
-        label_map = (labels.reshape((h, w)) + 1).astype(np.int32)
+        label_map = remapped_labels.reshape((h, w)).astype(np.int32)
 
         # Build one-hot spatial mask tensor (H, W, N)
+        # Channel k corresponds to label (k + 1) [channel 0 = largest segment]
         one_hot_map = np.zeros((h, w, n_clusters), dtype=np.uint8)
         for k in range(n_clusters):
             one_hot_map[:, :, k] = (label_map == (k + 1)).astype(np.uint8)
