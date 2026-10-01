@@ -256,6 +256,7 @@ class Experiment:
 
     # Probe Rendering Style Specs
     probe_color: Tuple[int, int, int, int] = (255, 0, 0, 255)
+    probe_outline_color: Tuple[int, int, int, int] = (255, 255, 255, 255)
     probe_radius: int = 5
     bg_color: Tuple[int, int, int, int] = (0, 0, 0, 255)
 
