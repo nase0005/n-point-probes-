@@ -267,6 +267,7 @@ class Experiment:
         run_configs: List[RunConfig],
         root_dir: Union[str, Path] = "./experiment_output",
         probe_color: Tuple[int, int, int, int] = (255, 0, 0, 255),
+        probe_outline_color: Tuple[int, int, int, int] = (255, 255, 255, 255),
         probe_radius: int = 5,
         bg_color: Tuple[int, int, int, int] = (0, 0, 0, 255),
     ) -> "Experiment":
@@ -274,6 +275,7 @@ class Experiment:
             experiment_id=experiment_id,
             root_dir=Path(root_dir),
             probe_color=probe_color,
+            probe_outline_color = probe_outline_color,
             probe_radius=probe_radius,
             bg_color=bg_color,
         )
