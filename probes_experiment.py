@@ -1046,11 +1046,12 @@ class StimulusRenderer:
 
                 draw = ImageDraw.Draw(canvas, mode="RGBA")
                 r = experiment.probe_radius
+                outline = experiment.probe_outline_color
                 for x, y in trial.probe.points_px:
                     draw.ellipse(
                         [x - r, y - r, x + r, y + r],
                         fill=experiment.probe_color,
-                        outline=(255, 255, 255, 255),
+                        outline=outline,
                     )
 
                 # Optional in-place ground truth banner overlay
