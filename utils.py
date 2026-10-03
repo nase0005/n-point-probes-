@@ -4,6 +4,17 @@ import numpy as np
 from PIL import Image
 import re
 from probes_experiment import TargetImage
+import unicodedata
+
+
+def sanitize_name(name: str) -> str:
+    """Removes non-printable Unicode control/formatting characters (e.g., LTR marks) and whitespace."""
+    if not name:
+        return ""
+    return "".join(
+        char for char in name 
+        if unicodedata.category(char) not in ("Cf", "Cc", "Cn")
+    ).strip()
 
 
 def load_target_images_from_directory(
@@ -20,7 +31,7 @@ def load_target_images_from_directory(
         recursive: If True, recursively searches subdirectories.
 
     Returns:
-        A list of initialized TargetImage instances.
+        A list of initialized TargetImage instances with sanitized names.
     """
     dir_path = Path(directory_path)
     if not dir_path.exists() or not dir_path.is_dir():
@@ -41,9 +52,12 @@ def load_target_images_from_directory(
             pil_img = Image.open(img_path).convert("RGBA")
             rgba_arr = np.array(pil_img)
 
+            # Sanitize filename stem to strip invisible formatting markers like '\u200e'
+            clean_name = sanitize_name(img_path.stem)
+
             # Instantiate TargetImage directly via dataclass constructor
             target_img = TargetImage(
-                name=img_path.stem,
+                name=clean_name,
                 image_path=img_path,
                 rgba_image=rgba_arr
             )
