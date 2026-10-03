@@ -1052,35 +1052,34 @@ class ProbeMaskAnalyzer:
     @classmethod
     def evaluate_experiment_results(
         cls,
-        experiment: Experiment,
+        run: Run,
         metrics: List[str],
         target_segment_id: Optional[int] = None,
     ) -> None:
-        """Computes requested metrics and updates trial.probe_result dictionaries."""
-        for run in experiment.runs:
-            label_map = run.target_image.label_map
-            if label_map is None:
-                raise ValueError(f"Label map not initialized for image '{run.target_image.name}'.")
+    """Computes requested metrics and updates trial.probe_result dictionaries."""
+        label_map = run.target_image.label_map
+        if label_map is None:
+            raise ValueError(f"Label map not initialized for image '{run.target_image.name}'.")
 
-            num_segs = run.target_image.num_segments
+        num_segs = run.target_image.num_segments
 
-            for trial in run.trials:
-                if trial.probe is None:
-                    continue
+        for trial in run.trials:
+            if trial.probe is None:
+                continue
 
-                res = {}
-                if "object_count" in metrics:
-                    res["object_count"] = cls.object_count(trial.probe, label_map)
-                if "touches_per_segment" in metrics:
-                    res["touches_per_segment"] = cls.touches_per_segment(trial.probe, label_map, num_segs)
-                if "target_object_hits" in metrics:
-                    if target_segment_id is None:
-                        raise ValueError("target_segment_id must be provided for 'target_object_hits' metric.")
-                    res[f"target_obj_{target_segment_id}_hits"] = cls.target_object_hits(
-                        trial.probe, label_map, target_segment_id
-                    )
+            res = {}
+            if "object_count" in metrics:
+                res["object_count"] = cls.object_count(trial.probe, label_map)
+            if "touches_per_segment" in metrics:
+                res["touches_per_segment"] = cls.touches_per_segment(trial.probe, label_map, num_segs)
+            if "target_object_hits" in metrics:
+                if target_segment_id is None:
+                    raise ValueError("target_segment_id must be provided for 'target_object_hits' metric.")
+                res[f"target_obj_{target_segment_id}_hits"] = cls.target_object_hits(
+                    trial.probe, label_map, target_segment_id
+                )
 
-                trial.probe_result = res
+            trial.probe_result = res
 
 
 # =============================================================================
