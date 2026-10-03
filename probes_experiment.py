@@ -1056,7 +1056,7 @@ class ProbeMaskAnalyzer:
         metrics: List[str],
         target_segment_id: Optional[int] = None,
     ) -> None:
-    """Computes requested metrics and updates trial.probe_result dictionaries."""
+        """Computes requested metrics and updates trial.probe_result dictionaries."""
         label_map = run.target_image.label_map
         if label_map is None:
             raise ValueError(f"Label map not initialized for image '{run.target_image.name}'.")
