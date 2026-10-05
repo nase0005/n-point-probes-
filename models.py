@@ -245,47 +245,81 @@ class TargetHitsNet(nn.Module):
 # Regularization and Loss Functions
 # ============================================================================
 
-class PoissonBinomialPMF(nn.Module):
-    """Computes P(R_v = r) for Poisson Binomial Distribution using dynamic programming.
+import torch
+import torch.nn as nn
 
-    Given probabilities p of shape (batch_size, n), this computes the log-likelihood
-    of observing exactly 'r' hits out of 'n' samples.
-    """
+class PoissonBinomialPMF(nn.Module):
+    """Computes distribution statistics and log-likelihood for the Poisson Binomial distribution."""
 
     def __init__(self):
         super().__init__()
 
-    def forward(self, p: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
-        """Args:
+    def compute_pmf(self, p: torch.Tensor) -> torch.Tensor:
+        """Computes P(R_v = r) for all r in {0, 1, ..., n}.
 
-        p: Tensor of shape (B, n) containing p_v(x_j) probabilities.
-        r: Tensor of shape (B,) containing observed target segment counts.
+        Args:
+            p: Tensor of shape (B, n) containing p_v(x_j) probabilities.
 
         Returns:
-            log_prob: Tensor of shape (B,) containing log P(R_v = r).
+            pmf: Tensor of shape (B, n + 1) where pmf[:, r] = P(R_v = r).
         """
         B, n = p.shape
-
-        # dp[i][j] = P(j hits using first i pixels)
-        # We compute this in log-space or probability space; using DP table:
         dp = torch.zeros(B, n + 1, device=p.device, dtype=p.dtype)
-        dp[:, 0] = 1.0  # Base case: 0 pixels sampled -> 0 hits with probability 1
+        dp[:, 0] = 1.0  # Base case: 0 sampled points -> 0 hits with prob 1.0
 
         for i in range(n):
             p_i = p[:, i : i + 1]  # Shape (B, 1)
             dp_next = torch.zeros_like(dp)
 
-            # 0 hits at step i+1: previous 0 hits AND pixel i is not target
+            # 0 hits at step i+1
             dp_next[:, 0] = dp[:, 0] * (1.0 - p_i.squeeze(-1))
 
-            # k hits at step i+1: (k hits & not target) OR (k-1 hits & target)
+            # k hits at step i+1: (k hits & miss) OR (k-1 hits & hit)
             dp_next[:, 1:] = dp[:, 1:] * (1.0 - p_i) + dp[:, :-1] * p_i
 
             dp = dp_next
 
-        # Gather probability corresponding to observed r for each batch item
+        return dp
+
+    def expected_value(self, p: torch.Tensor) -> torch.Tensor:
+        """Computes expected hits E[R] = sum_j p_j.
+
+        Args:
+            p: Tensor of shape (B, n).
+
+        Returns:
+            E_R: Tensor of shape (B,) containing E[R] for each batch item.
+        """
+        return torch.sum(p, dim=-1)
+
+    def mode(self, p: torch.Tensor) -> torch.Tensor:
+        """Computes argmax_r P(R = r), the most likely hit count.
+
+        Args:
+            p: Tensor of shape (B, n).
+
+        Returns:
+            r_mode: LongTensor of shape (B,) containing the mode count per trial.
+        """
+        pmf = self.compute_pmf(p)
+        return torch.argmax(pmf, dim=-1)
+
+    def forward(self, p: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+        """Computes log P(R_v = r) for observed counts r.
+
+        Args:
+            p: Tensor of shape (B, n).
+            r: Tensor of shape (B,) containing observed target segment counts.
+
+        Returns:
+            log_prob: Tensor of shape (B,) containing log P(R_v = r).
+        """
+        B = p.shape[0]
+        pmf = self.compute_pmf(p)
+
+        # Gather probability corresponding to observed r
         batch_indices = torch.arange(B, device=p.device)
-        prob_r = dp[batch_indices, r]
+        prob_r = pmf[batch_indices, r]
 
         # Numerical stability clamp
         prob_r = torch.clamp(prob_r, min=1e-12)
