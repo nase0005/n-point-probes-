@@ -220,12 +220,12 @@ class Trial:
             return False
         return True
 
-
 @dataclass
 class Run:
     """Group of trials associated with a single TargetImage."""
     run_id: str
     target_image: TargetImage
+    target_segment_id: Optional[int] = None
     trials: List[Trial] = field(default_factory=list)
     grid_points_px: Optional[List[Tuple[int, int]]] = None
     grid_points_norm: Optional[List[Tuple[float, float]]] = None
@@ -245,7 +245,7 @@ class RunConfig:
     num_imagery_trials: int
     vision_repeats: int = 1
     imagery_repeats: int = 1
-
+    target_segment_id: Optional[int] = None
 
 @dataclass
 class Experiment:
@@ -275,16 +275,19 @@ class Experiment:
             experiment_id=experiment_id,
             root_dir=Path(root_dir),
             probe_color=probe_color,
-            probe_outline_color = probe_outline_color,
+            probe_outline_color=probe_outline_color,
             probe_radius=probe_radius,
             bg_color=bg_color,
         )
         exp.root_dir.mkdir(parents=True, exist_ok=True)
 
         for config in run_configs:
-            run = Run(run_id=f"run_{config.target_image.name}", target_image=config.target_image)
+            run = Run(
+                run_id=f"run_{config.target_image.name}",
+                target_image=config.target_image,
+                target_segment_id=config.target_segment_id,
+            )
 
-            # Populate vision trials
             for i in range(config.num_vision_trials):
                 for r in range(config.vision_repeats):
                     run.trials.append(
@@ -295,7 +298,6 @@ class Experiment:
                         )
                     )
 
-            # Populate imagery trials
             for j in range(config.num_imagery_trials):
                 for r in range(config.imagery_repeats):
                     run.trials.append(
@@ -309,10 +311,30 @@ class Experiment:
             exp.runs.append(run)
         return exp
 
-    def validate(self) -> bool:
-        if not self.runs:
-            return False
-        return all(r.validate() for r in self.runs)
+    def export_target_assets(self) -> List[Path]:
+        """Exports target asset bundles including a standalone sampling_grid.npz file."""
+        assets_dir = self.root_dir / "target_assets"
+        saved_paths = []
+
+        seen_names = set()
+        for run in self.runs:
+            if run.target_image.name not in seen_names:
+                bundle_path = run.target_image.save_to_disk(assets_dir)
+
+                # Export sampling grid as a standalone compressed NumPy archive
+                grid_data = {}
+                if run.grid_points_px:
+                    grid_data["points_px"] = np.array(run.grid_points_px, dtype=np.int32)
+                if run.grid_points_norm:
+                    grid_data["points_norm"] = np.array(run.grid_points_norm, dtype=np.float32)
+
+                if grid_data:
+                    np.savez_compressed(bundle_path / "sampling_grid.npz", **grid_data)
+
+                saved_paths.append(bundle_path)
+                seen_names.add(run.target_image.name)
+
+        return saved_paths
 
     def to_dataframe(self) -> pd.DataFrame:
         """Flattens experiment structure into a Pandas DataFrame."""
@@ -328,21 +350,26 @@ class Experiment:
                     "trial_id": trial.trial_id,
                     "task_mode": trial.task_mode,
                     "target_image_name": trial.target_image.name,
+                    "target_segment_id": run.target_segment_id,
                     "target_image_path": str(trial.target_image.image_path.as_posix()),
                     "target_image_num_segments": trial.target_image.num_segments,
                     "rendered_stimulus_path": trial.rendered_stimulus_path or "",
-                    "probe_points_px": str(trial.probe.points_px) if trial.probe else "",
-                    "probe_points_norm": str(trial.probe.points_norm) if trial.probe else "",
+                    "probe_points_px": json.dumps(trial.probe.points_px) if trial.probe else "[]",
+                    "probe_points_norm": json.dumps(trial.probe.points_norm) if trial.probe else "[]",
                 }
-                # Flatten probe_result keys into distinct columns
                 if trial.probe_result:
                     for k, v in trial.probe_result.items():
-                        record[f"ground_truth_{k}"] = str(v) if isinstance(v, (list, dict, np.ndarray)) else v
+                        record[f"ground_truth_{k}"] = json.dumps(v) if isinstance(v, (list, dict, np.ndarray)) else v
 
                 records.append(record)
 
         return pd.DataFrame(records)
 
+    def validate(self) -> bool:
+        if not self.runs:
+            return False
+        return all(r.validate() for r in self.runs)
+    
     def export_summary_txt(self, output_path: Optional[Union[str, Path]] = None) -> str:
         """Generates a text summary of the experiment setup."""
         if not self.validate():
@@ -376,111 +403,8 @@ class Experiment:
         path.write_text(summary_text)
         return summary_text
 
-    def export_target_assets(self) -> List[Path]:
-        """Exports all unique target image bundles to the experiment root directory."""
-        assets_dir = self.root_dir / "target_assets"
-        saved_paths = []
-
-        seen_names = set()
-        for run in self.runs:
-            if run.target_image.name not in seen_names:
-                bundle_path = run.target_image.save_to_disk(assets_dir)
-                saved_paths.append(bundle_path)
-                seen_names.add(run.target_image.name)
-
-        return saved_paths
-
-    def to_data_bundle(self) -> Dict[str, Dict]:
-        """
-        Exports a nested dictionary data bundle organized by target image.
-        
-        Trial data for vision and imagery conditions are stacked into concatenated 
-        NumPy arrays along a leading trial dimension.
-        """
-        bundle = {}
-
-        for run in self.runs:
-            img = run.target_image
-            target_key = img.name
-
-            # Target assets sub-dictionary
-            target_assets = {
-                "name": img.name,
-                "image_path": str(img.image_path.as_posix()),
-                "dimensions": {"height": img.height, "width": img.width},
-                "num_segments": img.num_segments,
-                "rgba_image": img.rgba_image,
-                "label_map": img.label_map,
-                "one_hot_map": img.one_hot_map,
-            }
-
-            # Sampling grid sub-dictionary
-            sampling_grid = {
-                "points_px": np.array(run.grid_points_px, dtype=np.int32) if run.grid_points_px else np.array([]),
-                "points_norm": np.array(run.grid_points_norm, dtype=np.float32) if run.grid_points_norm else np.array([]),
-            }
-
-            # Helper function to vectorize condition trials
-            def _build_condition_bundle(task_mode: str) -> Dict:
-                cond_trials = [t for t in run.trials if t.task_mode == task_mode]
-                n_trials = len(cond_trials)
-
-                if n_trials == 0:
-                    return {
-                        "num_trials": 0,
-                        "trial_ids": np.array([], dtype=str),
-                        "probes": {"points_px": np.array([]), "points_norm": np.array([]), "masks": np.array([])},
-                        "results": {},
-                    }
-
-                trial_ids = np.array([t.trial_id for t in cond_trials], dtype=object)
-
-                # Concatenate probe spatial coordinates and masks
-                pts_px_list = [t.probe.points_px for t in cond_trials if t.probe]
-                pts_norm_list = [t.probe.points_norm for t in cond_trials if t.probe]
-                masks_list = [
-                    t.probe.binary_mask 
-                    if (t.probe and t.probe.binary_mask is not None) 
-                    else np.zeros((img.height, img.width), dtype=bool) 
-                    for t in cond_trials
-                ]
-
-                probes_data = {
-                    "points_px": np.array(pts_px_list, dtype=np.int32),
-                    "points_norm": np.array(pts_norm_list, dtype=np.float32),
-                    "masks": np.stack(masks_list, axis=0) if masks_list else np.array([]),
-                }
-
-                # Concatenate scalar and dictionary/array results
-                results_data = {}
-                first_results = cond_trials[0].probe_result
-                for res_key, res_val in first_results.items():
-                    res_type_list = [t.probe_result.get(res_key) for t in cond_trials]
-                    if isinstance(res_val, (int, float, bool)):
-                        results_data[res_key] = np.array(res_type_list)
-                    elif isinstance(res_val, (list, np.ndarray)):
-                        results_data[res_key] = np.stack(res_type_list, axis=0)
-                    elif isinstance(res_val, dict):
-                        # Convert dict metrics (e.g., touches_per_segment) into 2D stacked array
-                        dict_keys = list(res_val.keys())
-                        matrix = [[t.probe_result[res_key].get(dk, 0) for dk in dict_keys] for t in cond_trials]
-                        results_data[res_key] = np.array(matrix)
-
-                return {
-                    "num_trials": n_trials,
-                    "trial_ids": trial_ids,
-                    "probes": probes_data,
-                    "results": results_data,
-                }
-
-            bundle[target_key] = {
-                "target_assets": target_assets,
-                "sampling_grid": sampling_grid,
-                "vision": _build_condition_bundle("vision"),
-                "imagery": _build_condition_bundle("imagery"),
-            }
-
-        return bundle
+    
+    
 
 # =============================================================================
 # 2. TARGET SEGMENTATION (K-MEANS)
