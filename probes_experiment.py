@@ -1139,6 +1139,39 @@ def _safe_parse_container(val: Any) -> Any:
             return val_str
 
 
+def _recompute_points_px(pts: np.ndarray, orig_grid_pts: np.ndarray) -> np.ndarray:
+    """Remaps pixel coordinates from native resolution to downsampled target grid indices."""
+    pts_arr = np.array(pts)
+    if pts_arr.size == 0:
+        return pts_arr
+
+    orig_grid = np.array(orig_grid_pts)
+    if orig_grid.size == 0:
+        return pts_arr
+
+    orig_shape = pts_arr.shape
+
+    if orig_grid.ndim == 3:  # Structured 2D Grid (Hg, Wg, 2)
+        Hg, Wg, _ = orig_grid.shape
+        flat_grid = orig_grid.reshape(-1, 2)
+        flat_pts = pts_arr.reshape(-1, 2)
+
+        dists = np.sum((flat_pts[:, None, :] - flat_grid[None, :, :]) ** 2, axis=-1)
+        nearest_k = dists.argmin(axis=1)
+
+        cols = (nearest_k % Wg).astype(np.int32)
+        rows = (nearest_k // Wg).astype(np.int32)
+        return np.column_stack([cols, rows]).reshape(orig_shape)
+
+    elif orig_grid.ndim == 2:  # 1D Sequence of points (N, 2)
+        flat_pts = pts_arr.reshape(-1, 2)
+        dists = np.sum((flat_pts[:, None, :] - orig_grid[None, :, :]) ** 2, axis=-1)
+        nearest_idx = dists.argmin(axis=1).astype(np.int32)
+        return np.column_stack([np.zeros_like(nearest_idx), nearest_idx]).reshape(orig_shape)
+
+    return pts_arr
+
+
 def data_frame_to_data_bundle(
     df: pd.DataFrame,
     target_assets_dir: Optional[Union[str, Path]] = None,
@@ -1155,7 +1188,7 @@ def data_frame_to_data_bundle(
         Optional manual override directory for target assets. If None, automatically 
         loads assets using the target asset directory recorded in `df['target_image_path']`.
     downsample_to_grid : bool
-        If True, samples spatial maps at probe sampling grid points.
+        If True, downsamples target assets to sampling grid locations and updates pixel coordinates.
 
     Returns
     -------
@@ -1211,14 +1244,6 @@ def data_frame_to_data_bundle(
                         sampling_grid["points_px"] = npz["points_px"]
                     if "points_norm" in npz:
                         sampling_grid["points_norm"] = npz["points_norm"]
-
-            # Optional grid downsampling
-            if downsample_to_grid and loaded_target.label_map is not None and len(sampling_grid["points_px"]) > 0:
-                pts_px = sampling_grid["points_px"]
-                h, w = loaded_target.label_map.shape[:2]
-                x_coords = np.clip(pts_px[:, 0], 0, w - 1)
-                y_coords = np.clip(pts_px[:, 1], 0, h - 1)
-                target_assets["label_map_sampled_at_grid"] = loaded_target.label_map[y_coords, x_coords]
         else:
             warnings.warn(
                 f"Could not locate target asset directory for '{target_key}'. "
@@ -1233,6 +1258,42 @@ def data_frame_to_data_bundle(
                 raw_norm = _safe_parse_container(target_group["grid_points_norm"].iloc[0])
                 if raw_norm:
                     sampling_grid["points_norm"] = np.array(raw_norm, dtype=np.float32)
+
+        # 3. Downsample Target Assets to Grid & Recompute Coordinates
+        orig_grid_px = np.array(sampling_grid["points_px"])
+        if downsample_to_grid and len(orig_grid_px) > 0:
+            native_h = target_assets.get("dimensions", {}).get("height")
+            native_w = target_assets.get("dimensions", {}).get("width")
+
+            if native_h is None or native_w is None:
+                if target_assets.get("label_map") is not None:
+                    native_h, native_w = target_assets["label_map"].shape[:2]
+
+            x_coords = np.clip(orig_grid_px[..., 0], 0, native_w - 1).astype(int)
+            y_coords = np.clip(orig_grid_px[..., 1], 0, native_h - 1).astype(int)
+
+            # Downsample target assets in-place without additional interpolation
+            if target_assets.get("rgba_image") is not None:
+                target_assets["rgba_image"] = target_assets["rgba_image"][y_coords, x_coords]
+
+            if target_assets.get("label_map") is not None:
+                target_assets["label_map"] = target_assets["label_map"][y_coords, x_coords]
+
+            if target_assets.get("one_hot_map") is not None:
+                target_assets["one_hot_map"] = target_assets["one_hot_map"][y_coords, x_coords]
+
+            # Update dimensions metadata
+            if orig_grid_px.ndim == 3:
+                new_h, new_w = orig_grid_px.shape[0], orig_grid_px.shape[1]
+                grid_x, grid_y = np.meshgrid(np.arange(new_w), np.arange(new_h))
+                sampling_grid["points_px"] = np.stack([grid_x, grid_y], axis=-1).astype(np.int32)
+            else:
+                new_h, new_w = orig_grid_px.shape[0], 1
+                sampling_grid["points_px"] = np.column_stack(
+                    [np.zeros(new_h, dtype=np.int32), np.arange(new_h, dtype=np.int32)]
+                )
+
+            target_assets["dimensions"] = {"height": int(new_h), "width": int(new_w)}
 
         # Helper to process condition trials (vision / imagery)
         def _build_condition_bundle(cond_df: pd.DataFrame) -> Dict:
@@ -1250,8 +1311,14 @@ def data_frame_to_data_bundle(
             pts_px_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_px", [])]
             pts_norm_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_norm", [])]
 
+            probes_px = np.array(pts_px_list, dtype=np.int32) if pts_px_list else np.array([])
+
+            # Recompute probe points_px to reference downsampled pixel coordinates
+            if downsample_to_grid and len(orig_grid_px) > 0 and probes_px.size > 0:
+                probes_px = _recompute_points_px(probes_px, orig_grid_px)
+
             probes_data = {
-                "points_px": np.array(pts_px_list, dtype=np.int32) if pts_px_list else np.array([]),
+                "points_px": probes_px,
                 "points_norm": np.array(pts_norm_list, dtype=np.float32) if pts_norm_list else np.array([]),
             }
 
