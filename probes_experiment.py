@@ -1123,39 +1123,20 @@ import numpy as np
 import pandas as pd
 
 
-def _resolve_bundle_dir(
-    target_key: str, 
-    df_group: pd.DataFrame, 
-    target_assets_dir: Optional[Union[str, Path]]
-) -> Optional[Path]:
-    """Smart directory resolver for TargetImage asset bundle folders."""
-    # 1. Search explicit target_assets_dir if provided
-    if target_assets_dir is not None:
-        base_path = Path(target_assets_dir)
-        
-        # Check direct path: <target_assets_dir>/<target_key>
-        cand_direct = base_path / target_key
-        if cand_direct.exists() and cand_direct.is_dir():
-            return cand_direct
-
-        # Check nested path: <target_assets_dir>/target_assets/<target_key>
-        cand_nested = base_path / "target_assets" / target_key
-        if cand_nested.exists() and cand_nested.is_dir():
-            return cand_nested
-
-    # 2. Fall back to target_image_path column in DataFrame group
-    if "target_image_path" in df_group.columns and not df_group["target_image_path"].empty:
-        sample_path_str = str(df_group["target_image_path"].iloc[0])
-        if sample_path_str:
-            img_path = Path(sample_path_str)
-            # Case A: path points to file inside bundle dir (e.g. .../target_assets/name/rgba.png)
-            if img_path.parent.name == target_key and img_path.parent.exists():
-                return img_path.parent
-            # Case B: path parent contains the bundle dir
-            if (img_path.parent / target_key).exists():
-                return img_path.parent / target_key
-
-    return None
+def _safe_parse_container(val: Any) -> Any:
+    """Parses JSON strings, python literal strings, or returns original primitive values."""
+    if not isinstance(val, str):
+        return val
+    val_str = val.strip()
+    if not val_str:
+        return None
+    try:
+        return json.loads(val_str)
+    except Exception:
+        try:
+            return ast.literal_eval(val_str)
+        except Exception:
+            return val_str
 
 
 def data_frame_to_data_bundle(
@@ -1171,9 +1152,10 @@ def data_frame_to_data_bundle(
     df : pd.DataFrame
         Experimental results or conditions DataFrame.
     target_assets_dir : Optional[Union[str, Path]]
-        Directory where target asset folders reside (root output dir or target_assets dir).
+        Optional manual override directory for target assets. If None, automatically 
+        loads assets using the target asset directory recorded in `df['target_image_path']`.
     downsample_to_grid : bool
-        If True and target assets are available, samples spatial maps at probe sampling grid points.
+        If True, samples spatial maps at probe sampling grid points.
 
     Returns
     -------
@@ -1188,9 +1170,28 @@ def data_frame_to_data_bundle(
         target_assets = {"name": target_key}
         sampling_grid = {"points_px": np.array([]), "points_norm": np.array([])}
 
-        # Resolve bundle directory
-        bundle_dir = _resolve_bundle_dir(target_key, target_group, target_assets_dir)
+        # 1. Determine target asset bundle directory
+        bundle_dir = None
 
+        if target_assets_dir is not None:
+            # Manual override path
+            override_path = Path(target_assets_dir)
+            if (override_path / target_key).exists():
+                bundle_dir = override_path / target_key
+            elif (override_path / "target_assets" / target_key).exists():
+                bundle_dir = override_path / "target_assets" / target_key
+            elif override_path.exists() and override_path.is_dir():
+                bundle_dir = override_path
+
+        # Fall back to target_image_path column directly exported by Experiment.to_dataframe()
+        if bundle_dir is None and "target_image_path" in target_group.columns and not target_group["target_image_path"].empty:
+            path_str = str(target_group["target_image_path"].iloc[0])
+            if path_str:
+                cand_path = Path(path_str)
+                if cand_path.exists() and cand_path.is_dir():
+                    bundle_dir = cand_path
+
+        # 2. Load target assets and sampling grid from disk
         if bundle_dir and bundle_dir.exists():
             loaded_target = TargetImage.load_from_disk(bundle_dir)
             target_assets.update({
@@ -1220,11 +1221,10 @@ def data_frame_to_data_bundle(
                 target_assets["label_map_sampled_at_grid"] = loaded_target.label_map[y_coords, x_coords]
         else:
             warnings.warn(
-                f"Could not locate target asset bundle folder for target '{target_key}'. "
-                "Target image assets will only contain 'name'. Ensure export_target_assets() "
-                "was called or pass target_assets_dir explicitly."
+                f"Could not locate target asset directory for '{target_key}'. "
+                "Ensure experiment.export_target_assets() was called before building the data bundle."
             )
-            # Recover grid points from DataFrame columns if present
+            # Recover grid points from DataFrame columns if available
             if "grid_points_px" in target_group.columns:
                 raw_px = _safe_parse_container(target_group["grid_points_px"].iloc[0])
                 if raw_px:
