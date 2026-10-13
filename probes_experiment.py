@@ -1087,29 +1087,6 @@ class StimulusRenderer:
                 trial.rendered_stimulus_path = rel_path
 
 
-import ast
-import json
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
-import numpy as np
-import pandas as pd
-
-
-def _safe_parse_container(val: Any) -> Any:
-    """Parses JSON strings, python literal strings, or returns original primitive values."""
-    if not isinstance(val, str):
-        return val
-    val_str = val.strip()
-    if not val_str:
-        return None
-    try:
-        return json.loads(val_str)
-    except Exception:
-        try:
-            return ast.literal_eval(val_str)
-        except Exception:
-            return val_str
-
 # =============================================================================
 # 6. CONVERTS EXPERIMENT DATAFRAME TO DATA BUNDLE THAT IS HELPFUL FOR ANALYSIS
 # =============================================================================
@@ -1295,4 +1272,77 @@ def data_frame_to_data_bundle(
             if target_assets.get("rgba_image") is not None:
                 target_assets["rgba_image"] = _sample_and_reshape(target_assets["rgba_image"])
 
-            if target_assets.get("label_map") is not None
+            if target_assets.get("label_map") is not None:
+                target_assets["label_map"] = _sample_and_reshape(target_assets["label_map"])
+
+            if target_assets.get("one_hot_map") is not None:
+                target_assets["one_hot_map"] = _sample_and_reshape(target_assets["one_hot_map"])
+
+            target_assets["dimensions"] = {"height": new_h, "width": new_w}
+
+        # 4. Process Trials per Condition (vision / imagery)
+        def _build_condition_bundle(cond_df: pd.DataFrame) -> Dict:
+            n_trials = len(cond_df)
+            if n_trials == 0:
+                return {
+                    "num_trials": 0,
+                    "trial_ids": np.array([], dtype=str),
+                    "probes": {"points_px": np.array([]), "points_norm": np.array([])},
+                    "results": {},
+                }
+
+            trial_ids = cond_df["trial_id"].to_numpy()
+
+            pts_px_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_px", [])]
+            pts_norm_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_norm", [])]
+
+            pts_px_arr = np.array(pts_px_list, dtype=np.int32) if pts_px_list else np.array([])
+            pts_norm_arr = np.array(pts_norm_list, dtype=np.float32) if pts_norm_list else np.array([])
+
+            # Remap probe pixel points if grid downsampling was requested
+            if downsample_to_grid and len(orig_grid_px) > 0 and pts_px_arr.size > 0:
+                pts_px_arr = _recompute_points_px(pts_px_arr, orig_grid_px)
+
+            probes_data = {
+                "points_px": pts_px_arr,
+                "points_norm": pts_norm_arr,
+            }
+
+            results_data = {}
+            gt_cols = [c for c in cond_df.columns if c.startswith("ground_truth_")]
+
+            for col in gt_cols:
+                metric_key = col.replace("ground_truth_", "")
+                parsed_vals = [_safe_parse_container(v) for v in cond_df[col]]
+                first_val = parsed_vals[0] if len(parsed_vals) > 0 else None
+
+                if isinstance(first_val, (int, float, bool)):
+                    results_data[metric_key] = np.array(parsed_vals)
+                elif isinstance(first_val, list):
+                    results_data[metric_key] = np.array(parsed_vals)
+                elif isinstance(first_val, dict):
+                    dict_keys = list(first_val.keys())
+                    matrix = [[v.get(dk, 0) if isinstance(v, dict) else 0 for dk in dict_keys] for v in parsed_vals]
+                    results_data[metric_key] = np.array(matrix)
+                else:
+                    results_data[metric_key] = np.array(parsed_vals, dtype=object)
+
+            return {
+                "num_trials": n_trials,
+                "trial_ids": trial_ids,
+                "probes": probes_data,
+                "results": results_data,
+            }
+
+        vis_df = target_group[target_group["task_mode"] == "vision"]
+        img_df = target_group[target_group["task_mode"] == "imagery"]
+
+        bundle[target_key] = {
+            "target_assets": target_assets,
+            "sampling_grid": sampling_grid,
+            "vision": _build_condition_bundle(vis_df),
+            "imagery": _build_condition_bundle(img_df),
+        }
+
+    return bundle
+
