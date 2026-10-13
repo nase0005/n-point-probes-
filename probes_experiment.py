@@ -1049,7 +1049,7 @@ class ProbeMaskAnalyzer:
         labels = cls._extract_labels(probe_input, label_map)
         return int(np.sum(labels == target_segment_id))
 
-@classmethod
+    @classmethod
     def evaluate_experiment_results(
         cls,
         run: Run,
