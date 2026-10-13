@@ -1013,7 +1013,7 @@ class ProbeMaskAnalyzer:
                     )
                 # Store target_id as a standalone value and the hits count under a fixed key
                 res["target_id"] = int(effective_seg_id)
-                res["target_obj_hits"] = cls.target_object_hits(
+                res["target_object_hits"] = cls.target_object_hits(
                     trial.probe, label_map, effective_seg_id
                 )
 
