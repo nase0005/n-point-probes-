@@ -1272,17 +1272,7 @@ def data_frame_to_data_bundle(
             x_coords = np.clip(orig_grid_px[..., 0], 0, native_w - 1).astype(int)
             y_coords = np.clip(orig_grid_px[..., 1], 0, native_h - 1).astype(int)
 
-            # Downsample target assets in-place without additional interpolation
-            if target_assets.get("rgba_image") is not None:
-                target_assets["rgba_image"] = target_assets["rgba_image"][y_coords, x_coords]
-
-            if target_assets.get("label_map") is not None:
-                target_assets["label_map"] = target_assets["label_map"][y_coords, x_coords]
-
-            if target_assets.get("one_hot_map") is not None:
-                target_assets["one_hot_map"] = target_assets["one_hot_map"][y_coords, x_coords]
-
-            # Update dimensions metadata
+            # Determine downsampled spatial grid dimensions (new_h, new_w)
             if orig_grid_px.ndim == 3:
                 new_h, new_w = orig_grid_px.shape[0], orig_grid_px.shape[1]
                 grid_x, grid_y = np.meshgrid(np.arange(new_w), np.arange(new_h))
@@ -1293,69 +1283,16 @@ def data_frame_to_data_bundle(
                     [np.zeros(new_h, dtype=np.int32), np.arange(new_h, dtype=np.int32)]
                 )
 
-            target_assets["dimensions"] = {"height": int(new_h), "width": int(new_w)}
+            # Helper to sample and reshape while preserving original number of dimensions (.ndim)
+            def _sample_and_reshape(asset: Optional[np.ndarray]) -> Optional[np.ndarray]:
+                if asset is None:
+                    return None
+                sampled = asset[y_coords, x_coords]
+                target_shape = (new_h, new_w) + asset.shape[2:]
+                return sampled.reshape(target_shape)
 
-        # Helper to process condition trials (vision / imagery)
-        def _build_condition_bundle(cond_df: pd.DataFrame) -> Dict:
-            n_trials = len(cond_df)
-            if n_trials == 0:
-                return {
-                    "num_trials": 0,
-                    "trial_ids": np.array([], dtype=str),
-                    "probes": {"points_px": np.array([]), "points_norm": np.array([])},
-                    "results": {},
-                }
+            # Downsample target assets in-place and maintain native dimensionality
+            if target_assets.get("rgba_image") is not None:
+                target_assets["rgba_image"] = _sample_and_reshape(target_assets["rgba_image"])
 
-            trial_ids = cond_df["trial_id"].to_numpy()
-
-            pts_px_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_px", [])]
-            pts_norm_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_norm", [])]
-
-            probes_px = np.array(pts_px_list, dtype=np.int32) if pts_px_list else np.array([])
-
-            # Recompute probe points_px to reference downsampled pixel coordinates
-            if downsample_to_grid and len(orig_grid_px) > 0 and probes_px.size > 0:
-                probes_px = _recompute_points_px(probes_px, orig_grid_px)
-
-            probes_data = {
-                "points_px": probes_px,
-                "points_norm": np.array(pts_norm_list, dtype=np.float32) if pts_norm_list else np.array([]),
-            }
-
-            results_data = {}
-            gt_cols = [c for c in cond_df.columns if c.startswith("ground_truth_")]
-
-            for col in gt_cols:
-                metric_key = col.replace("ground_truth_", "")
-                parsed_vals = [_safe_parse_container(v) for v in cond_df[col]]
-                first_val = parsed_vals[0] if len(parsed_vals) > 0 else None
-
-                if isinstance(first_val, (int, float, bool)):
-                    results_data[metric_key] = np.array(parsed_vals)
-                elif isinstance(first_val, list):
-                    results_data[metric_key] = np.array(parsed_vals)
-                elif isinstance(first_val, dict):
-                    dict_keys = list(first_val.keys())
-                    matrix = [[v.get(dk, 0) if isinstance(v, dict) else 0 for dk in dict_keys] for v in parsed_vals]
-                    results_data[metric_key] = np.array(matrix)
-                else:
-                    results_data[metric_key] = np.array(parsed_vals, dtype=object)
-
-            return {
-                "num_trials": n_trials,
-                "trial_ids": trial_ids,
-                "probes": probes_data,
-                "results": results_data,
-            }
-
-        vis_df = target_group[target_group["task_mode"] == "vision"]
-        img_df = target_group[target_group["task_mode"] == "imagery"]
-
-        bundle[target_key] = {
-            "target_assets": target_assets,
-            "sampling_grid": sampling_grid,
-            "vision": _build_condition_bundle(vis_df),
-            "imagery": _build_condition_bundle(img_df),
-        }
-
-    return bundle
+            if target_assets.get("label_map") is not None
