@@ -344,6 +344,9 @@ class Experiment:
         records = []
         for run in self.runs:
             for trial in run.trials:
+                # Direct path to the exported target assets folder for this image
+                target_asset_dir = self.root_dir / "target_assets" / trial.target_image.name
+
                 record = {
                     "experiment_id": self.experiment_id,
                     "run_id": run.run_id,
@@ -351,9 +354,12 @@ class Experiment:
                     "task_mode": trial.task_mode,
                     "target_image_name": trial.target_image.name,
                     "target_segment_id": run.target_segment_id,
-                    "target_image_path": str(trial.target_image.image_path.as_posix()),
+                    "target_image_path": str(target_asset_dir.as_posix()),  # <--- Points to target asset folder
                     "target_image_num_segments": trial.target_image.num_segments,
                     "rendered_stimulus_path": trial.rendered_stimulus_path or "",
+                    # Sampling grid definitions stored at Run level
+                    "grid_points_px": json.dumps(run.grid_points_px) if run.grid_points_px else "[]",
+                    "grid_points_norm": json.dumps(run.grid_points_norm) if run.grid_points_norm else "[]",
                     "probe_points_px": json.dumps(trial.probe.points_px) if trial.probe else "[]",
                     "probe_points_norm": json.dumps(trial.probe.points_norm) if trial.probe else "[]",
                 }
