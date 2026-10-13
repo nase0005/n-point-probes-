@@ -1049,7 +1049,7 @@ class ProbeMaskAnalyzer:
         labels = cls._extract_labels(probe_input, label_map)
         return int(np.sum(labels == target_segment_id))
 
-    @classmethod
+@classmethod
     def evaluate_experiment_results(
         cls,
         run: Run,
@@ -1062,6 +1062,7 @@ class ProbeMaskAnalyzer:
             raise ValueError(f"Label map not initialized for image '{run.target_image.name}'.")
 
         num_segs = run.target_image.num_segments
+        effective_seg_id = target_segment_id if target_segment_id is not None else run.target_segment_id
 
         for trial in run.trials:
             if trial.probe is None:
@@ -1070,13 +1071,20 @@ class ProbeMaskAnalyzer:
             res = {}
             if "object_count" in metrics:
                 res["object_count"] = cls.object_count(trial.probe, label_map)
+
             if "touches_per_segment" in metrics:
                 res["touches_per_segment"] = cls.touches_per_segment(trial.probe, label_map, num_segs)
+
             if "target_object_hits" in metrics:
-                if target_segment_id is None:
-                    raise ValueError("target_segment_id must be provided for 'target_object_hits' metric.")
-                res[f"target_obj_{target_segment_id}_hits"] = cls.target_object_hits(
-                    trial.probe, label_map, target_segment_id
+                if effective_seg_id is None:
+                    raise ValueError(
+                        "target_segment_id must be provided directly or defined on the Run "
+                        "for 'target_object_hits' metric."
+                    )
+                # Store target_id as a standalone value and the hits count under a fixed key
+                res["target_id"] = int(effective_seg_id)
+                res["target_obj_hits"] = cls.target_object_hits(
+                    trial.probe, label_map, effective_seg_id
                 )
 
             trial.probe_result = res
