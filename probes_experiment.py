@@ -1108,6 +1108,50 @@ def _safe_parse_container(val: Any) -> Any:
 # 6. CONVERTS EXPERIMENT DATAFRAME TO DATA BUNDLE THAT IS HELPFUL FOR ANALYSIS
 # =============================================================================
 
+import ast
+import json
+import warnings
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+import numpy as np
+import pandas as pd
+
+
+def _resolve_bundle_dir(
+    target_key: str, 
+    df_group: pd.DataFrame, 
+    target_assets_dir: Optional[Union[str, Path]]
+) -> Optional[Path]:
+    """Smart directory resolver for TargetImage asset bundle folders."""
+    # 1. Search explicit target_assets_dir if provided
+    if target_assets_dir is not None:
+        base_path = Path(target_assets_dir)
+        
+        # Check direct path: <target_assets_dir>/<target_key>
+        cand_direct = base_path / target_key
+        if cand_direct.exists() and cand_direct.is_dir():
+            return cand_direct
+
+        # Check nested path: <target_assets_dir>/target_assets/<target_key>
+        cand_nested = base_path / "target_assets" / target_key
+        if cand_nested.exists() and cand_nested.is_dir():
+            return cand_nested
+
+    # 2. Fall back to target_image_path column in DataFrame group
+    if "target_image_path" in df_group.columns and not df_group["target_image_path"].empty:
+        sample_path_str = str(df_group["target_image_path"].iloc[0])
+        if sample_path_str:
+            img_path = Path(sample_path_str)
+            # Case A: path points to file inside bundle dir (e.g. .../target_assets/name/rgba.png)
+            if img_path.parent.name == target_key and img_path.parent.exists():
+                return img_path.parent
+            # Case B: path parent contains the bundle dir
+            if (img_path.parent / target_key).exists():
+                return img_path.parent / target_key
+
+    return None
+
+
 def data_frame_to_data_bundle(
     df: pd.DataFrame,
     target_assets_dir: Optional[Union[str, Path]] = None,
@@ -1121,7 +1165,7 @@ def data_frame_to_data_bundle(
     df : pd.DataFrame
         Experimental results or conditions DataFrame.
     target_assets_dir : Optional[Union[str, Path]]
-        Directory where target asset folders (containing rgba.png, maps.npz, sampling_grid.npz) reside.
+        Directory where target asset folders reside (root output dir or target_assets dir).
     downsample_to_grid : bool
         If True and target assets are available, samples spatial maps at probe sampling grid points.
 
@@ -1131,46 +1175,60 @@ def data_frame_to_data_bundle(
         Nested data bundle dictionary keyed by target image name.
     """
     bundle = {}
-    assets_path = Path(target_assets_dir) if target_assets_dir else None
 
-    # Group records by Target Image
+    # Group records by Target Image Name
     for target_name, target_group in df.groupby("target_image_name"):
         target_key = str(target_name)
         target_assets = {"name": target_key}
         sampling_grid = {"points_px": np.array([]), "points_norm": np.array([])}
 
-        # Load target assets from disk if asset directory is provided
-        if assets_path:
-            bundle_dir = assets_path / target_key
-            if bundle_dir.exists():
-                loaded_target = TargetImage.load_from_disk(bundle_dir)
-                target_assets.update({
-                    "image_path": str(loaded_target.image_path.as_posix()),
-                    "dimensions": {"height": loaded_target.height, "width": loaded_target.width},
-                    "num_segments": loaded_target.num_segments,
-                    "rgba_image": loaded_target.rgba_image,
-                    "label_map": loaded_target.label_map,
-                    "one_hot_map": loaded_target.one_hot_map,
-                })
+        # Resolve bundle directory
+        bundle_dir = _resolve_bundle_dir(target_key, target_group, target_assets_dir)
 
-                # Load standalone sampling grid array
-                grid_file = bundle_dir / "sampling_grid.npz"
-                if grid_file.exists():
-                    with np.load(grid_file) as npz:
-                        if "points_px" in npz:
-                            sampling_grid["points_px"] = npz["points_px"]
-                        if "points_norm" in npz:
-                            sampling_grid["points_norm"] = npz["points_norm"]
+        if bundle_dir and bundle_dir.exists():
+            loaded_target = TargetImage.load_from_disk(bundle_dir)
+            target_assets.update({
+                "image_path": str(loaded_target.image_path.as_posix()),
+                "dimensions": {"height": loaded_target.height, "width": loaded_target.width},
+                "num_segments": loaded_target.num_segments,
+                "rgba_image": loaded_target.rgba_image,
+                "label_map": loaded_target.label_map,
+                "one_hot_map": loaded_target.one_hot_map,
+            })
 
-                # Optional grid downsampling
-                if downsample_to_grid and loaded_target.label_map is not None and len(sampling_grid["points_px"]) > 0:
-                    pts_px = sampling_grid["points_px"]
-                    h, w = loaded_target.label_map.shape[:2]
-                    x_coords = np.clip(pts_px[:, 0], 0, w - 1)
-                    y_coords = np.clip(pts_px[:, 1], 0, h - 1)
-                    target_assets["label_map_sampled_at_grid"] = loaded_target.label_map[y_coords, x_coords]
+            # Load standalone sampling grid array
+            grid_file = bundle_dir / "sampling_grid.npz"
+            if grid_file.exists():
+                with np.load(grid_file) as npz:
+                    if "points_px" in npz:
+                        sampling_grid["points_px"] = npz["points_px"]
+                    if "points_norm" in npz:
+                        sampling_grid["points_norm"] = npz["points_norm"]
 
-        # Helper to process trials per condition (vision / imagery)
+            # Optional grid downsampling
+            if downsample_to_grid and loaded_target.label_map is not None and len(sampling_grid["points_px"]) > 0:
+                pts_px = sampling_grid["points_px"]
+                h, w = loaded_target.label_map.shape[:2]
+                x_coords = np.clip(pts_px[:, 0], 0, w - 1)
+                y_coords = np.clip(pts_px[:, 1], 0, h - 1)
+                target_assets["label_map_sampled_at_grid"] = loaded_target.label_map[y_coords, x_coords]
+        else:
+            warnings.warn(
+                f"Could not locate target asset bundle folder for target '{target_key}'. "
+                "Target image assets will only contain 'name'. Ensure export_target_assets() "
+                "was called or pass target_assets_dir explicitly."
+            )
+            # Recover grid points from DataFrame columns if present
+            if "grid_points_px" in target_group.columns:
+                raw_px = _safe_parse_container(target_group["grid_points_px"].iloc[0])
+                if raw_px:
+                    sampling_grid["points_px"] = np.array(raw_px, dtype=np.int32)
+            if "grid_points_norm" in target_group.columns:
+                raw_norm = _safe_parse_container(target_group["grid_points_norm"].iloc[0])
+                if raw_norm:
+                    sampling_grid["points_norm"] = np.array(raw_norm, dtype=np.float32)
+
+        # Helper to process condition trials (vision / imagery)
         def _build_condition_bundle(cond_df: pd.DataFrame) -> Dict:
             n_trials = len(cond_df)
             if n_trials == 0:
@@ -1183,7 +1241,6 @@ def data_frame_to_data_bundle(
 
             trial_ids = cond_df["trial_id"].to_numpy()
 
-            # Parse probe points
             pts_px_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_px", [])]
             pts_norm_list = [_safe_parse_container(p) for p in cond_df.get("probe_points_norm", [])]
 
@@ -1192,15 +1249,14 @@ def data_frame_to_data_bundle(
                 "points_norm": np.array(pts_norm_list, dtype=np.float32) if pts_norm_list else np.array([]),
             }
 
-            # Extract ground_truth_* metrics
             results_data = {}
             gt_cols = [c for c in cond_df.columns if c.startswith("ground_truth_")]
 
             for col in gt_cols:
                 metric_key = col.replace("ground_truth_", "")
                 parsed_vals = [_safe_parse_container(v) for v in cond_df[col]]
-                
                 first_val = parsed_vals[0] if len(parsed_vals) > 0 else None
+
                 if isinstance(first_val, (int, float, bool)):
                     results_data[metric_key] = np.array(parsed_vals)
                 elif isinstance(first_val, list):
