@@ -1095,7 +1095,7 @@ import ast
 import json
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
@@ -1153,6 +1153,7 @@ def data_frame_to_data_bundle(
     df: pd.DataFrame,
     target_assets_dir: Optional[Union[str, Path]] = None,
     downsample_to_grid: bool = False,
+    extra_result_cols: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict]:
     """
     Constructs a structured nested data bundle from an experimental DataFrame.
@@ -1167,6 +1168,9 @@ def data_frame_to_data_bundle(
     downsample_to_grid : bool
         If True, downsamples target assets to a 2D spatial grid image format (Hg, Wg) 
         and updates probe pixel coordinates to grid indices.
+    extra_result_cols : Optional[Sequence[str]]
+        Additional column names to include in the bundle's `results` dictionary 
+        (e.g., empirical PsychoPy outputs like ['rt', 'accuracy'] or derived feature columns).
 
     Returns
     -------
@@ -1251,7 +1255,6 @@ def data_frame_to_data_bundle(
                 new_h, new_w = orig_grid_px.shape[0], orig_grid_px.shape[1]
                 grid_pts_2d = orig_grid_px
             elif orig_grid_px.ndim == 2:
-                # Infer 2D grid dimensions from unique x and y coordinate counts
                 unique_x = np.unique(orig_grid_px[:, 0])
                 unique_y = np.unique(orig_grid_px[:, 1])
                 if len(unique_x) * len(unique_y) == len(orig_grid_px):
@@ -1263,15 +1266,12 @@ def data_frame_to_data_bundle(
             else:
                 new_h, new_w = 1, 1
 
-            # Extract 2D coordinate matrices for spatial indexing
             x_coords = np.clip(grid_pts_2d[..., 0], 0, native_w - 1).astype(int)
             y_coords = np.clip(grid_pts_2d[..., 1], 0, native_h - 1).astype(int)
 
-            # Re-index sampling_grid points_px to match downsampled (new_h, new_w) matrix coordinates
             grid_x, grid_y = np.meshgrid(np.arange(new_w), np.arange(new_h))
             sampling_grid["points_px"] = np.stack([grid_x, grid_y], axis=-1).astype(np.int32)
 
-            # Sample assets into proper 2D spatial image shape (Hg, Wg, ...)
             def _sample_asset(asset: Optional[np.ndarray]) -> Optional[np.ndarray]:
                 if asset is None:
                     return None
@@ -1307,7 +1307,6 @@ def data_frame_to_data_bundle(
             pts_px_arr = np.array(pts_px_list, dtype=np.int32) if pts_px_list else np.array([])
             pts_norm_arr = np.array(pts_norm_list, dtype=np.float32) if pts_norm_list else np.array([])
 
-            # Remap probe pixel points to 2D grid indices if downsampling was requested
             if downsample_to_grid and len(grid_pts_2d) > 0 and pts_px_arr.size > 0:
                 pts_px_arr = _recompute_points_px(pts_px_arr, grid_pts_2d)
 
@@ -1316,15 +1315,23 @@ def data_frame_to_data_bundle(
                 "points_norm": pts_norm_arr,
             }
 
+            # Collect all result columns: ground_truth_* + requested extra_result_cols
             results_data = {}
-            gt_cols = [c for c in cond_df.columns if c.startswith("ground_truth_")]
+            target_cols = [c for c in cond_df.columns if c.startswith("ground_truth_")]
 
-            for col in gt_cols:
-                metric_key = col.replace("ground_truth_", "")
+            if extra_result_cols:
+                for col_name in extra_result_cols:
+                    if col_name in cond_df.columns and col_name not in target_cols:
+                        target_cols.append(col_name)
+                    elif col_name not in cond_df.columns:
+                        warnings.warn(f"Requested result column '{col_name}' not found in DataFrame.")
+
+            for col in target_cols:
+                metric_key = col.replace("ground_truth_", "") if col.startswith("ground_truth_") else col
                 parsed_vals = [_safe_parse_container(v) for v in cond_df[col]]
                 first_val = parsed_vals[0] if len(parsed_vals) > 0 else None
 
-                if isinstance(first_val, (int, float, bool)):
+                if isinstance(first_val, (int, float, bool, np.number)):
                     results_data[metric_key] = np.array(parsed_vals)
                 elif isinstance(first_val, list):
                     results_data[metric_key] = np.array(parsed_vals)
